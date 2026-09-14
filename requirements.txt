@@ -1,0 +1,6 @@
+# Bewusst schlank -- je weniger Abhaengigkeiten, desto weniger kann brechen.
+requests>=2.32,<3
+webuntis>=0.1.24
+
+# Nur fuer die Tests
+pytest>=8.0
