@@ -1,0 +1,589 @@
+{
+ "schema": 2,
+ "saved_at": "2026-09-14T07:06:32+00:00",
+ "window": {
+  "from": "2026-09-14",
+  "to": "2026-09-21"
+ },
+ "pending": "",
+ "lessons": [
+  {
+   "uid": 801821,
+   "date": "2026-09-14",
+   "start": "09:20",
+   "end": "10:05",
+   "subjects": [
+    "E"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 9900
+  },
+  {
+   "uid": 801824,
+   "date": "2026-09-14",
+   "start": "10:25",
+   "end": "11:10",
+   "subjects": [
+    "E"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 9900
+  },
+  {
+   "uid": 826807,
+   "date": "2026-09-14",
+   "start": "11:15",
+   "end": "12:00",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 826810,
+   "date": "2026-09-14",
+   "start": "12:05",
+   "end": "12:50",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 838371,
+   "date": "2026-09-14",
+   "start": "13:25",
+   "end": "14:10",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  },
+  {
+   "uid": 838374,
+   "date": "2026-09-14",
+   "start": "14:15",
+   "end": "15:00",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  },
+  {
+   "uid": 833980,
+   "date": "2026-09-15",
+   "start": "09:20",
+   "end": "10:05",
+   "subjects": [
+    "DV1"
+   ],
+   "teachers": [],
+   "rooms": [
+    "DV1_2.02"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "DV1_3WGI13_1_Ab",
+   "lesson_no": 108300
+  },
+  {
+   "uid": 834676,
+   "date": "2026-09-15",
+   "start": "09:20",
+   "end": "10:05",
+   "subjects": [
+    "DV2"
+   ],
+   "teachers": [],
+   "rooms": [
+    "DV2_2.03"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "DV2_3WGI13_1_Wa",
+   "lesson_no": 108400
+  },
+  {
+   "uid": 833983,
+   "date": "2026-09-15",
+   "start": "10:25",
+   "end": "11:10",
+   "subjects": [
+    "DV1"
+   ],
+   "teachers": [],
+   "rooms": [
+    "DV1_2.02"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "DV1_3WGI13_1_Ab",
+   "lesson_no": 108300
+  },
+  {
+   "uid": 834679,
+   "date": "2026-09-15",
+   "start": "10:25",
+   "end": "11:10",
+   "subjects": [
+    "DV2"
+   ],
+   "teachers": [],
+   "rooms": [
+    "DV2_2.03"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "DV2_3WGI13_1_Wa",
+   "lesson_no": 108400
+  },
+  {
+   "uid": 826813,
+   "date": "2026-09-15",
+   "start": "11:15",
+   "end": "12:00",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 826816,
+   "date": "2026-09-15",
+   "start": "12:05",
+   "end": "12:50",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 828121,
+   "date": "2026-09-15",
+   "start": "13:25",
+   "end": "14:10",
+   "subjects": [
+    "WI"
+   ],
+   "teachers": [],
+   "rooms": [
+    "DV3_2.04"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "WI_3WGI13_13WGW13_2_Do",
+   "lesson_no": 110600
+  },
+  {
+   "uid": 828124,
+   "date": "2026-09-15",
+   "start": "14:15",
+   "end": "15:00",
+   "subjects": [
+    "WI"
+   ],
+   "teachers": [],
+   "rooms": [
+    "DV3_2.04"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "WI_3WGI13_13WGW13_2_Do",
+   "lesson_no": 110600
+  },
+  {
+   "uid": 838377,
+   "date": "2026-09-16",
+   "start": "07:40",
+   "end": "08:25",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  },
+  {
+   "uid": 838380,
+   "date": "2026-09-16",
+   "start": "08:30",
+   "end": "09:15",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  },
+  {
+   "uid": 838383,
+   "date": "2026-09-16",
+   "start": "09:20",
+   "end": "10:05",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  },
+  {
+   "uid": 817207,
+   "date": "2026-09-16",
+   "start": "10:25",
+   "end": "11:10",
+   "subjects": [
+    "PH"
+   ],
+   "teachers": [],
+   "rooms": [
+    "Ph_0.03"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "PH_3WGI13_13WGW13_2_Za",
+   "lesson_no": 108900
+  },
+  {
+   "uid": 821645,
+   "date": "2026-09-16",
+   "start": "13:25",
+   "end": "14:10",
+   "subjects": [
+    "S"
+   ],
+   "teachers": [],
+   "rooms": [
+    "SpHalle3"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "S_3WGI13_13WGW13_2_Kl",
+   "lesson_no": 109800
+  },
+  {
+   "uid": 821648,
+   "date": "2026-09-16",
+   "start": "14:15",
+   "end": "15:00",
+   "subjects": [
+    "S"
+   ],
+   "teachers": [],
+   "rooms": [
+    "SpHalle3"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "S_3WGI13_13WGW13_2_Kl",
+   "lesson_no": 109800
+  },
+  {
+   "uid": 817210,
+   "date": "2026-09-17",
+   "start": "11:15",
+   "end": "12:00",
+   "subjects": [
+    "PH"
+   ],
+   "teachers": [],
+   "rooms": [
+    "Ph_0.03"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "PH_3WGI13_13WGW13_2_Za",
+   "lesson_no": 108900
+  },
+  {
+   "uid": 817213,
+   "date": "2026-09-17",
+   "start": "12:05",
+   "end": "12:50",
+   "subjects": [
+    "PH"
+   ],
+   "teachers": [],
+   "rooms": [
+    "Ph_0.03"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "PH_3WGI13_13WGW13_2_Za",
+   "lesson_no": 108900
+  },
+  {
+   "uid": 801827,
+   "date": "2026-09-17",
+   "start": "13:25",
+   "end": "14:10",
+   "subjects": [
+    "E"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 9900
+  },
+  {
+   "uid": 801830,
+   "date": "2026-09-17",
+   "start": "14:15",
+   "end": "15:00",
+   "subjects": [
+    "E"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 9900
+  },
+  {
+   "uid": 808358,
+   "date": "2026-09-18",
+   "start": "07:40",
+   "end": "08:25",
+   "subjects": [
+    "GGK"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 12600
+  },
+  {
+   "uid": 808361,
+   "date": "2026-09-18",
+   "start": "08:30",
+   "end": "09:15",
+   "subjects": [
+    "GGK"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 12600
+  },
+  {
+   "uid": 826819,
+   "date": "2026-09-18",
+   "start": "11:15",
+   "end": "12:00",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 826822,
+   "date": "2026-09-18",
+   "start": "12:05",
+   "end": "12:50",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 801833,
+   "date": "2026-09-21",
+   "start": "09:20",
+   "end": "10:05",
+   "subjects": [
+    "E"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 9900
+  },
+  {
+   "uid": 801836,
+   "date": "2026-09-21",
+   "start": "10:25",
+   "end": "11:10",
+   "subjects": [
+    "E"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 9900
+  },
+  {
+   "uid": 826825,
+   "date": "2026-09-21",
+   "start": "11:15",
+   "end": "12:00",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 826828,
+   "date": "2026-09-21",
+   "start": "12:05",
+   "end": "12:50",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 838386,
+   "date": "2026-09-21",
+   "start": "13:25",
+   "end": "14:10",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  },
+  {
+   "uid": 838389,
+   "date": "2026-09-21",
+   "start": "14:15",
+   "end": "15:00",
+   "subjects": [
+    "M(E1)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "M(E1)_3WGI13_13WGW13_2_Do",
+   "lesson_no": 109300
+  }
+ ]
+}
