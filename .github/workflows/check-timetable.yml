@@ -1,0 +1,78 @@
+name: Stundenplan pruefen
+
+# Warum diese Konstruktion?
+#
+# GitHubs Zeitplaner haelt kurze Intervalle nicht ein. Ein "alle 5 Minuten"
+# wird verzoegert, gebuendelt oder ganz verworfen -- in der Praxis kamen nur
+# eine Handvoll Laeufe pro Tag zustande. Fuer "erste Stunde faellt aus" ist
+# das nutzlos.
+#
+# Deshalb taktet der Bot selbst: Ein gestarteter Lauf prueft 55 Minuten lang
+# alle 5 Minuten. Der Zeitplaner muss nur noch UEBERHAUPT einen Lauf starten,
+# nicht 288 puenktliche pro Tag.
+#
+# Der Trigger steht auf halbstuendlich, obwohl ein Lauf 55 Minuten dauert.
+# Das ist Absicht: Faellt ein Start aus, springt der naechste ein. Die
+# concurrency-Gruppe verhindert Parallellaeufe -- ein wartender Lauf startet
+# nahtlos, sobald der vorige endet.
+#
+# Ein Durchlauf dauert rund drei Sekunden, das Repo ist oeffentlich und hat
+# damit unbegrenzte Actions-Minuten. Es kostet also nichts.
+
+on:
+  schedule:
+    # Alle 30 Minuten, 4-17 UTC, Mo-Fr.
+    # UTC, weil GitHub keine Zeitzonen kennt -- das deckt 6:00-19:00 Ortszeit
+    # ab, in Winter- wie Sommerzeit.
+    - cron: "0,30 4-17 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      minuten:
+        description: "Wie lange dieser Lauf ueberwachen soll"
+        required: false
+        default: "10"
+
+permissions:
+  contents: write        # noetig, um state.json zurueckzuschreiben
+
+concurrency:
+  group: untisbot
+  # Niemals abbrechen: Ein laufender Check darf nicht mitten im Versand
+  # gekappt werden.
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Ueberwachen
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WEBUNTIS_SERVER: ${{ secrets.WEBUNTIS_SERVER }}
+          WEBUNTIS_SCHOOL: ${{ secrets.WEBUNTIS_SCHOOL }}
+          WEBUNTIS_USERNAME: ${{ secrets.WEBUNTIS_USERNAME }}
+          WEBUNTIS_PASSWORD: ${{ secrets.WEBUNTIS_PASSWORD }}
+          WEBUNTIS_KLASSE: ${{ secrets.WEBUNTIS_KLASSE }}
+          LOOKAHEAD_DAYS: "7"
+          TIMEZONE: "Europe/Berlin"
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          python bot.py watch --minutes "${{ github.event.inputs.minuten || '55' }}"
+
+# Hinweis: GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein
+# Commit im Repo passiert -- etwa ueber die Sommerferien. Danach einmal im
+# Actions-Tab "Enable workflow" klicken.
