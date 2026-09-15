@@ -128,9 +128,7 @@ BASIS_ENV = {
 @pytest.fixture
 def env(monkeypatch):
     """Saubere Umgebung: alle bekannten Variablen erst weg, dann die Basis."""
-    for name in list(BASIS_ENV) + ["WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE",
-                                   "ICLOUD_USERNAME", "ICLOUD_APP_PASSWORD",
-                                   "ICLOUD_CALENDAR_NAME"]:
+    for name in list(BASIS_ENV) + ["WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE"]:
         monkeypatch.delenv(name, raising=False)
     for name, value in BASIS_ENV.items():
         monkeypatch.setenv(name, value)
@@ -199,35 +197,6 @@ def test_config_lookahead_keine_zahl(env):
 def test_config_lookahead_wird_begrenzt(env, eingabe, erwartet):
     env.setenv("LOOKAHEAD_DAYS", eingabe)
     assert Config.from_env().lookahead_days == erwartet
-
-
-def test_config_icloud_standardmaessig_aus(env):
-    assert Config.from_env().icloud_enabled is False
-
-
-def test_config_icloud_an_wenn_beide_werte_da(env):
-    env.setenv("ICLOUD_USERNAME", "ich@icloud.com")
-    env.setenv("ICLOUD_APP_PASSWORD", "abcd-efgh-ijkl-mnop")
-    cfg = Config.from_env()
-    assert cfg.icloud_enabled is True
-    assert cfg.icloud_calendar_name == "Stundenplan"
-
-
-def test_config_icloud_aus_wenn_passwort_fehlt(env):
-    env.setenv("ICLOUD_USERNAME", "ich@icloud.com")
-    assert Config.from_env().icloud_enabled is False
-
-
-def test_config_icloud_aus_wenn_benutzer_fehlt(env):
-    env.setenv("ICLOUD_APP_PASSWORD", "abcd-efgh")
-    assert Config.from_env().icloud_enabled is False
-
-
-def test_config_icloud_kalendername_ueberschreibbar(env):
-    env.setenv("ICLOUD_USERNAME", "ich@icloud.com")
-    env.setenv("ICLOUD_APP_PASSWORD", "abcd")
-    env.setenv("ICLOUD_CALENDAR_NAME", "Schule")
-    assert Config.from_env().icloud_calendar_name == "Schule"
 
 
 def test_config_ist_unveraenderlich(cfg):
@@ -1878,370 +1847,6 @@ def test_state_ist_unveraenderlich():
 
 
 # ===========================================================================
-#  iCloud-Kalender  (reine Planung + Attrappen, nie gegen Apple)
-# ===========================================================================
-
-class FakeComponent(dict):
-    """Verhaelt sich wie eine icalendar-Komponente: get('uid')."""
-
-
-class FakeEvent:
-    def __init__(self, uid, data="", kaputt=False):
-        self.uid = uid
-        self.data = data or f"BEGIN:VEVENT\nUID:{uid}\nSUMMARY:alt\nEND:VEVENT"
-        self._kaputt = kaputt
-        self.gespeichert = 0
-        self.geloescht = False
-
-    @property
-    def icalendar_component(self):
-        if self._kaputt:
-            raise ValueError("Termin nicht lesbar")
-        return FakeComponent(uid=self.uid)
-
-    def save(self):
-        self.gespeichert += 1
-
-    def delete(self):
-        self.geloescht = True
-
-
-class FakeCalendar:
-    def __init__(self, events=None, events_fehler=False):
-        self._events = list(events or [])
-        self._events_fehler = events_fehler
-        self.angelegt = []
-
-    def events(self):
-        if self._events_fehler:
-            raise RuntimeError("iCloud antwortet nicht")
-        return list(self._events)
-
-    def save_event(self, ics):
-        self.angelegt.append(ics)
-
-
-@pytest.fixture
-def icloud_cfg(cfg):
-    return bot.dataclasses.replace(cfg, icloud_user="ich@icloud.com",
-                                   icloud_app_password="abcd-efgh")
-
-
-def test_lesson_uid_nutzt_webuntis_id():
-    assert bot.lesson_uid(lesson(uid=77)) == "untisbot-77"
-
-
-def test_lesson_uid_faellt_auf_schluessel_zurueck():
-    uid = bot.lesson_uid(lesson(uid=None))
-    assert uid.startswith(bot.CAL_UID_PREFIX) and MO in uid
-
-
-def test_lesson_uid_stabil_bei_raumwechsel():
-    assert bot.lesson_uid(lesson(uid=7, rooms=("R1",))) == \
-           bot.lesson_uid(lesson(uid=7, rooms=("R2",)))
-
-
-def test_lesson_uid_immer_mit_praefix():
-    for l in (lesson(uid=1), lesson(uid=None), lesson(uid=0)):
-        assert bot.lesson_uid(l).startswith(bot.CAL_UID_PREFIX)
-
-
-def test_calendar_summary():
-    assert bot.calendar_summary(lesson(subjects=("M",))) == "M"
-
-
-def test_calendar_summary_markiert_aenderung():
-    assert bot.calendar_summary(lesson(status=IRREGULAR)).startswith("⚠️")
-
-
-def test_calendar_description_enthaelt_alles():
-    text = bot.calendar_description(lesson(teachers=("Abel",), group="M-LK", note="Info"))
-    assert "Abel" in text and "M-LK" in text and "Info" in text
-
-
-def test_calendar_description_nennt_den_urheber():
-    assert "untisbot" in bot.calendar_description(lesson())
-
-
-def test_calendar_description_ohne_lehrerdaten():
-    """ks-hausach gibt Schuelern keine Lehrerdaten -- kein Bug."""
-    text = bot.calendar_description(lesson(teachers=()))
-    assert "Lehrkraft" not in text
-
-
-def test_plan_sync_legt_neue_an():
-    anlegen, loeschen = bot.plan_calendar_sync([lesson(uid=1)], [])
-    assert len(anlegen) == 1 and loeschen == set()
-
-
-def test_plan_sync_behaelt_bestehende():
-    anlegen, loeschen = bot.plan_calendar_sync([lesson(uid=1)], ["untisbot-1"])
-    assert [l.uid for l in anlegen] == [1]
-    assert loeschen == set()
-
-
-def test_plan_sync_loescht_verschwundene():
-    anlegen, loeschen = bot.plan_calendar_sync([], ["untisbot-1"])
-    assert not anlegen and loeschen == {"untisbot-1"}
-
-
-def test_plan_sync_loescht_ausgefallene_stunden():
-    """Der Nutzer wollte ausdruecklich 'bei Entfall geloescht', nicht
-    'als entfallen markiert'."""
-    anlegen, loeschen = bot.plan_calendar_sync([lesson(uid=1, status=CANCELLED)],
-                                               ["untisbot-1"])
-    assert not anlegen and loeschen == {"untisbot-1"}
-
-
-def test_plan_sync_ausgefallene_werden_gar_nicht_erst_angelegt():
-    anlegen, loeschen = bot.plan_calendar_sync([lesson(uid=1, status=CANCELLED)], [])
-    assert not anlegen and not loeschen
-
-
-def test_plan_sync_ruehrt_fremde_termine_nie_an():
-    """SICHERHEITSNETZ: Eigene Kalendertermine des Nutzers im selben
-    Kalender sind tabu. Mutationstest: das startswith(CAL_UID_PREFIX) in
-    plan_calendar_sync entfernen -> dieser Test muss rot werden."""
-    fremde = ["zahnarzt-4711", "geburtstag-oma", "", "untisbot"]
-    anlegen, loeschen = bot.plan_calendar_sync([], fremde)
-    assert loeschen == set()
-
-
-def test_plan_sync_trennt_eigene_von_fremden():
-    anlegen, loeschen = bot.plan_calendar_sync([], ["untisbot-1", "zahnarzt-4711"])
-    assert loeschen == {"untisbot-1"}
-
-
-def test_plan_sync_irregulaere_stunden_kommen_in_den_kalender():
-    anlegen, _loeschen = bot.plan_calendar_sync([lesson(uid=1, status=IRREGULAR)], [])
-    assert len(anlegen) == 1
-
-
-def test_build_ics_enthaelt_kernfelder():
-    ics = bot.build_ics_event(lesson(uid=7, rooms=("R1",), subjects=("M",)),
-                              "Europe/Berlin").decode()
-    assert "UID:untisbot-7" in ics
-    assert "SUMMARY:M" in ics
-    assert "LOCATION:R1" in ics
-    assert "DTSTART" in ics and "DTEND" in ics
-
-
-def test_build_ics_ohne_raum_keine_location():
-    ics = bot.build_ics_event(lesson(uid=7, rooms=()), "Europe/Berlin").decode()
-    assert "LOCATION" not in ics
-
-
-def test_build_ics_hat_vtimezone():
-    """Strengere CalDAV-Server (iCloud eingeschlossen) lehnen den PUT sonst ab."""
-    ics = bot.build_ics_event(lesson(uid=7), "Europe/Berlin").decode()
-    assert "BEGIN:VTIMEZONE" in ics
-
-
-def test_build_ics_nutzt_die_richtige_zeit():
-    ics = bot.build_ics_event(lesson(uid=7, start="07:40", end="08:25"),
-                              "Europe/Berlin").decode()
-    assert "20260914T074000" in ics and "20260914T082500" in ics
-
-
-def test_fingerprint_ignoriert_dtstamp():
-    """Ohne diesen Vergleich wuerde jede Stunde bei JEDEM 5-Minuten-Lauf
-    neu geschrieben."""
-    a = "BEGIN:VEVENT\nUID:x\nDTSTAMP:20260101T000000Z\nSUMMARY:M\nEND:VEVENT"
-    b = "BEGIN:VEVENT\nUID:x\nDTSTAMP:20260914T120000Z\nSUMMARY:M\nEND:VEVENT"
-    assert bot._event_fingerprint(a) == bot._event_fingerprint(b)
-
-
-def test_fingerprint_sieht_inhaltliche_aenderung():
-    a = "BEGIN:VEVENT\nUID:x\nSUMMARY:M\nEND:VEVENT"
-    b = "BEGIN:VEVENT\nUID:x\nSUMMARY:D\nEND:VEVENT"
-    assert bot._event_fingerprint(a) != bot._event_fingerprint(b)
-
-
-def test_fingerprint_nimmt_bytes_und_text():
-    text = "BEGIN:VEVENT\nUID:x\nEND:VEVENT"
-    assert bot._event_fingerprint(text) == bot._event_fingerprint(text.encode())
-
-
-def test_fingerprint_zweimal_gebautes_ics_ist_gleich():
-    """Der Praxisfall: derselbe Termin, zweimal gebaut, unterschiedliche
-    DTSTAMP -- muss als unveraendert gelten."""
-    l = lesson(uid=7, rooms=("R1",))
-    a = bot.build_ics_event(l, "Europe/Berlin")
-    b = bot.build_ics_event(l, "Europe/Berlin")
-    assert bot._event_fingerprint(a) == bot._event_fingerprint(b)
-
-
-def test_sync_legt_fehlende_termine_an(icloud_cfg, monkeypatch):
-    kalender = FakeCalendar()
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bericht = bot.sync_calendar(icloud_cfg, [lesson(uid=1), lesson(uid=2, start="08:30")])
-    assert len(kalender.angelegt) == 2
-    assert "2 neu" in bericht
-
-
-def test_sync_ueberspringt_unveraenderte(icloud_cfg, monkeypatch):
-    l = lesson(uid=1)
-    vorhanden = FakeEvent("untisbot-1", bot.build_ics_event(l, "Europe/Berlin").decode())
-    kalender = FakeCalendar([vorhanden])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bericht = bot.sync_calendar(icloud_cfg, [l])
-    assert vorhanden.gespeichert == 0
-    assert "1 unveraendert" in bericht
-
-
-def test_sync_aktualisiert_geaenderte(icloud_cfg, monkeypatch):
-    alt = bot.build_ics_event(lesson(uid=1, rooms=("R1",)), "Europe/Berlin").decode()
-    vorhanden = FakeEvent("untisbot-1", alt)
-    kalender = FakeCalendar([vorhanden])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bericht = bot.sync_calendar(icloud_cfg, [lesson(uid=1, rooms=("R9",))])
-    assert vorhanden.gespeichert == 1
-    assert "1 aktualisiert" in bericht
-
-
-def test_sync_loescht_ausgefallene(icloud_cfg, monkeypatch):
-    vorhanden = FakeEvent("untisbot-1")
-    kalender = FakeCalendar([vorhanden])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bot.sync_calendar(icloud_cfg, [lesson(uid=1, status=CANCELLED)])
-    assert vorhanden.geloescht is True
-
-
-def test_sync_ruehrt_fremde_termine_nicht_an(icloud_cfg, monkeypatch):
-    """SICHERHEITSNETZ, zweite Ebene: auch der ganze Abgleich darf einen
-    fremden Termin weder loeschen noch ueberschreiben."""
-    fremd = FakeEvent("zahnarzt-4711")
-    kalender = FakeCalendar([fremd])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bot.sync_calendar(icloud_cfg, [])
-    assert fremd.geloescht is False and fremd.gespeichert == 0
-
-
-def test_sync_leerer_plan_leert_nur_eigene_termine(icloud_cfg, monkeypatch):
-    eigen, fremd = FakeEvent("untisbot-1"), FakeEvent("privat-2")
-    kalender = FakeCalendar([eigen, fremd])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bot.sync_calendar(icloud_cfg, [])
-    assert eigen.geloescht is True and fremd.geloescht is False
-
-
-def test_sync_ein_unlesbarer_termin_stoppt_den_rest_nicht(icloud_cfg, monkeypatch):
-    """Sonst legt ein einziger Ausreisser den Abgleich dauerhaft und
-    stillschweigend lahm."""
-    kaputt = FakeEvent("egal", kaputt=True)
-    kalender = FakeCalendar([kaputt])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bericht = bot.sync_calendar(icloud_cfg, [lesson(uid=1)])
-    assert len(kalender.angelegt) == 1
-    assert "unlesbar" in bericht
-
-
-def test_sync_ein_schreibfehler_stoppt_den_rest_nicht(icloud_cfg, monkeypatch):
-    class BockigerKalender(FakeCalendar):
-        def save_event(self, ics):
-            if b"untisbot-1" in ics:
-                raise RuntimeError("abgelehnt")
-            super().save_event(ics)
-
-    kalender = BockigerKalender()
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bericht = bot.sync_calendar(icloud_cfg, [lesson(uid=1), lesson(uid=2, start="08:30")])
-    assert len(kalender.angelegt) == 1
-    assert "1 Fehler" in bericht
-
-
-def test_sync_ein_loeschfehler_stoppt_den_rest_nicht(icloud_cfg, monkeypatch):
-    class BockigerTermin(FakeEvent):
-        def delete(self):
-            raise RuntimeError("abgelehnt")
-
-    bockig, brav = BockigerTermin("untisbot-1"), FakeEvent("untisbot-2")
-    kalender = FakeCalendar([bockig, brav])
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: kalender)
-    bot.sync_calendar(icloud_cfg, [])
-    assert brav.geloescht is True
-
-
-def test_sync_abfragefehler_wird_zu_calendarerror(icloud_cfg, monkeypatch):
-    monkeypatch.setattr(bot, "get_calendar", lambda _cfg: FakeCalendar(events_fehler=True))
-    with pytest.raises(bot.CalendarError):
-        bot.sync_calendar(icloud_cfg, [lesson()])
-
-
-def test_sync_safe_macht_nichts_ohne_konfiguration(cfg, monkeypatch):
-    def darf_nicht(*_a, **_k):
-        raise AssertionError("ohne Konfiguration darf nichts passieren")
-
-    monkeypatch.setattr(bot, "sync_calendar", darf_nicht)
-    bot.sync_calendar_safe(cfg, [lesson()])
-
-
-def test_sync_safe_schluckt_jeden_fehler(icloud_cfg, monkeypatch):
-    """SICHERHEITSNETZ: Telegram ist die Hauptaufgabe, der Kalender eine
-    Zusatzfunktion. Mutationstest: das try/except in sync_calendar_safe
-    entfernen -> dieser Test muss rot werden."""
-    def explodiert(*_a, **_k):
-        raise RuntimeError("iCloud brennt")
-
-    monkeypatch.setattr(bot, "sync_calendar", explodiert)
-    bot.sync_calendar_safe(icloud_cfg, [lesson()])
-
-
-def test_sync_safe_reicht_erfolg_durch(icloud_cfg, monkeypatch):
-    aufgerufen = []
-    monkeypatch.setattr(bot, "sync_calendar",
-                        lambda _c, ls: aufgerufen.append(len(ls)) or "0 neu")
-    bot.sync_calendar_safe(icloud_cfg, [lesson(), lesson(uid=2, start="08:30")])
-    assert aufgerufen == [2]
-
-
-def test_get_calendar_meldet_fehlenden_kalender(icloud_cfg, monkeypatch):
-    """Der Bot legt den Kalender bewusst NICHT selbst an."""
-    class FakePrincipal:
-        def calendars(self):
-            return [type("K", (), {"name": "Privat"})()]
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def principal(self):
-            return FakePrincipal()
-
-    fake_caldav = type("M", (), {"DAVClient": FakeClient})
-    monkeypatch.setitem(sys.modules, "caldav", fake_caldav)
-    with pytest.raises(bot.CalendarError, match="nicht gefunden"):
-        bot.get_calendar(icloud_cfg)
-
-
-def test_get_calendar_findet_kalender_per_name(icloud_cfg, monkeypatch):
-    treffer = type("K", (), {"name": "Stundenplan"})()
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def principal(self):
-            return type("P", (), {"calendars": lambda _s: [treffer]})()
-
-    monkeypatch.setitem(sys.modules, "caldav", type("M", (), {"DAVClient": FakeClient}))
-    assert bot.get_calendar(icloud_cfg) is treffer
-
-
-def test_get_calendar_verbindungsfehler(icloud_cfg, monkeypatch):
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def principal(self):
-            raise RuntimeError("401 Unauthorized")
-
-    monkeypatch.setitem(sys.modules, "caldav", type("M", (), {"DAVClient": FakeClient}))
-    with pytest.raises(bot.CalendarError, match="Verbindung"):
-        bot.get_calendar(icloud_cfg)
-
-
-# ===========================================================================
 #  Ablauf: check_once
 # ===========================================================================
 
@@ -2276,15 +1881,13 @@ class FakeUntis:
 @pytest.fixture
 def ablauf(monkeypatch, tmp_path):
     """Verkabelt check_once mit Attrappen und protokolliert, was passiert."""
-    protokoll = {"gesendet": [], "committed": 0, "kalender": []}
+    protokoll = {"gesendet": [], "committed": 0}
 
     monkeypatch.setattr(bot, "send",
                         lambda _cfg, text, **_k: protokoll["gesendet"].append(text))
     monkeypatch.setattr(bot, "commit_state",
                         lambda *_a, **_k: protokoll.__setitem__("committed",
                                                                 protokoll["committed"] + 1))
-    monkeypatch.setattr(bot, "sync_calendar_safe",
-                        lambda _cfg, ls: protokoll["kalender"].append(len(ls)))
     monkeypatch.setattr(bot, "now_local",
                         lambda _tz: dt.datetime(2026, 9, 14, 8, 0))
     protokoll["pfad"] = tmp_path / "state.json"
@@ -2477,21 +2080,6 @@ def test_check_fenster_komplett_verschoben(cfg, ablauf):
     assert ergebnis.status == bot.OK
     assert "neu grundiert" in ergebnis.message
     assert ablauf["gesendet"] == []
-
-
-def test_check_gleicht_kalender_auch_ohne_aenderungen_ab(cfg, ablauf):
-    """Volle Rekonziliation bei jedem Lauf -- ein verpasster Lauf
-    repariert sich beim naechsten von selbst."""
-    untis_liefert(ablauf, [lesson(uid=1)])
-    bot.check_once(cfg, state_path=ablauf["pfad"])
-    bot.check_once(cfg, state_path=ablauf["pfad"])
-    assert ablauf["kalender"] == [1, 1]
-
-
-def test_check_gleicht_kalender_im_dry_run_nicht_ab(cfg, ablauf):
-    untis_liefert(ablauf, [lesson(uid=1)])
-    bot.check_once(cfg, dry_run=True, state_path=ablauf["pfad"])
-    assert ablauf["kalender"] == []
 
 
 def test_check_sichert_zustand_nach_jedem_lauf(cfg, ablauf):
@@ -3114,32 +2702,6 @@ def test_selftest_meldet_kaputten_token(cfg, monkeypatch, capsys):
     assert "[NEIN]" in capsys.readouterr().out
 
 
-def test_selftest_ohne_icloud_sagt_optional(cfg, monkeypatch, capsys):
-    monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {"username": "bot"})
-    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()]))
-    bot.selftest(cfg)
-    assert "nicht eingerichtet (optional)" in capsys.readouterr().out
-
-
-def test_selftest_prueft_icloud_wenn_eingerichtet(icloud_cfg, monkeypatch, capsys):
-    monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {"username": "bot"})
-    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()]))
-    monkeypatch.setattr(bot, "get_calendar",
-                        lambda _c: FakeCalendar([FakeEvent("untisbot-1")]))
-    bot.selftest(icloud_cfg)
-    assert "1 Termine darin" in capsys.readouterr().out
-
-
-def test_selftest_meldet_fehlenden_kalender(icloud_cfg, monkeypatch, capsys):
-    monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {"username": "bot"})
-    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()]))
-    monkeypatch.setattr(bot, "get_calendar",
-                        lambda _c: (_ for _ in ()).throw(
-                            bot.CalendarError("Kalender 'Stundenplan' nicht gefunden.")))
-    assert bot.selftest(icloud_cfg) == 1
-    assert "nicht gefunden" in capsys.readouterr().out
-
-
 def test_show_gibt_plan_aus(cfg, monkeypatch, capsys):
     monkeypatch.setattr(bot, "Untis", FakeUntis([lesson(rooms=("R1",), note="Info")]))
     assert bot.show(cfg, 3) == 0
@@ -3229,17 +2791,15 @@ def test_testmessage_ist_als_test_erkennbar(cfg, monkeypatch):
     assert "TESTNACHRICHT" in gesendet[0]
 
 
-def test_testmessage_ruehrt_zustand_und_kalender_nicht_an(cfg, monkeypatch):
+def test_testmessage_ruehrt_den_zustand_nicht_an(cfg, monkeypatch):
     """SICHERHEITSNETZ: Eine Testnachricht darf den Betrieb nicht
-    veraendern -- sonst faelscht sie den Vergleich des naechsten Laufs
-    oder schreibt Termine in den Kalender."""
+    veraendern -- sonst faelscht sie den Vergleich des naechsten Laufs."""
     def verboten(*_a, **_k):
         raise AssertionError("testmessage darf das nicht anfassen")
 
     monkeypatch.setattr(bot, "save_state", verboten)
     monkeypatch.setattr(bot, "load_state", verboten)
     monkeypatch.setattr(bot, "commit_state", verboten)
-    monkeypatch.setattr(bot, "sync_calendar_safe", verboten)
     monkeypatch.setattr(bot, "send", lambda *_a, **_k: 1)
     monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
     assert bot.testmessage(cfg) == 0
@@ -3274,22 +2834,6 @@ def test_testmessage_ueberlebt_kaputtes_webuntis(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis", KaputtesUntis())
     assert bot.testmessage(cfg) == 0
     assert "TESTNACHRICHT" in gesendet[0] and "NICHT verfügbar" in gesendet[0]
-
-
-def test_testmessage_meldet_icloud_status(icloud_cfg, monkeypatch):
-    gesendet = []
-    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
-    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
-    bot.testmessage(icloud_cfg)
-    assert "iCloud-Kalender: eingerichtet" in gesendet[0]
-
-
-def test_testmessage_meldet_fehlendes_icloud(cfg, monkeypatch):
-    gesendet = []
-    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
-    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
-    bot.testmessage(cfg)
-    assert "nicht eingerichtet" in gesendet[0]
 
 
 def test_testmessage_gibt_1_bei_versandfehler(cfg, monkeypatch, capsys):

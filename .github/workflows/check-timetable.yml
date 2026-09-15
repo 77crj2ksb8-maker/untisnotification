@@ -77,13 +77,6 @@ jobs:
           WEBUNTIS_USERNAME: ${{ secrets.WEBUNTIS_USERNAME }}
           WEBUNTIS_PASSWORD: ${{ secrets.WEBUNTIS_PASSWORD }}
           WEBUNTIS_KLASSE: ${{ secrets.WEBUNTIS_KLASSE }}
-          # Optional: Ohne diese drei Secrets bleibt der Kalender-Abgleich
-          # einfach aus (Config.icloud_enabled ist dann False). Ein nicht
-          # gesetztes Secret ist auf GitHub ein leerer String, kein Fehler --
-          # der Workflow laeuft also unveraendert weiter, solange sie fehlen.
-          ICLOUD_USERNAME: ${{ secrets.ICLOUD_USERNAME }}
-          ICLOUD_APP_PASSWORD: ${{ secrets.ICLOUD_APP_PASSWORD }}
-          ICLOUD_CALENDAR_NAME: ${{ secrets.ICLOUD_CALENDAR_NAME }}
           LOOKAHEAD_DAYS: "7"
           TIMEZONE: "Europe/Berlin"
         run: |

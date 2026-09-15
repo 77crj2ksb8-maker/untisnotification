@@ -75,15 +75,6 @@ class Config:
     untis_klasse: str = ""
     lookahead_days: int = 7
     timezone: str = "Europe/Berlin"
-    icloud_user: str = ""
-    icloud_app_password: str = ""
-    icloud_calendar_name: str = "Stundenplan"
-
-    @property
-    def icloud_enabled(self) -> bool:
-        """Kalender-Abgleich ist optional -- an, sobald beide Werte gesetzt sind."""
-        return bool(self.icloud_user and self.icloud_app_password)
-
     @staticmethod
     def from_env() -> "Config":
         """Liest die Konfiguration aus Umgebungsvariablen.
@@ -132,9 +123,6 @@ class Config:
             untis_klasse=maybe("WEBUNTIS_KLASSE"),
             lookahead_days=max(1, min(days, 30)),
             timezone=maybe("TIMEZONE", "Europe/Berlin"),
-            icloud_user=maybe("ICLOUD_USERNAME"),
-            icloud_app_password=maybe("ICLOUD_APP_PASSWORD"),
-            icloud_calendar_name=maybe("ICLOUD_CALENDAR_NAME", "Stundenplan"),
         )
 
 
@@ -1630,235 +1618,6 @@ def _commit_state(path: Path) -> bool:
 
 
 # ===========================================================================
-#  iCloud-Kalender  (I/O, optional)
-# ===========================================================================
-#
-# Abgleich passiert als volle Rekonziliation des Fensters bei jedem Lauf,
-# nicht als Uebersetzung einzelner Change-Objekte: Der Kalender soll immer
-# zeigen, was JETZT gilt -- unabhaengig davon, ob ein Lauf dazwischen
-# ausgefallen ist oder der Telegram-Versand geklappt hat. Das macht den
-# Abgleich selbst-heilend: ein verpasster Lauf repariert sich beim naechsten
-# von selbst, ohne dass Aenderungen einzeln nachvollzogen werden muessen.
-#
-# Ausfall heisst hier wirklich WEG, nicht durchgestrichen -- der Nutzer hat
-# explizit "bei Entfall geloescht" gewollt, nicht "als entfallen markiert".
-#
-# Nur Termine mit dem eigenen Praefix werden je geloescht oder ueberschrieben
-# -- eigene Kalendertermine des Nutzers im selben Kalender sind tabu, auch
-# wenn er versehentlich denselben Kalendernamen fuer anderes mitbenutzt.
-
-CAL_UID_PREFIX = "untisbot-"
-
-
-class CalendarError(RuntimeError):
-    """iCloud-Kalender nicht erreichbar oder falsch eingerichtet."""
-
-
-def lesson_uid(lesson: Lesson) -> str:
-    """Stabile Kalender-UID -- bleibt gleich, wenn sich nur Raum/Fach aendern.
-
-    Bevorzugt die WebUntis-id (ueberlebt reine Feldaenderungen). Fehlt sie
-    (Sonderfall ohne id), faellt es auf den fachlichen Schluessel zurueck --
-    weniger stabil bei Zeitverschiebung, aber immer noch eindeutig genug,
-    um doppelte Termine zu vermeiden.
-    """
-    base = str(lesson.uid) if lesson.uid is not None else lesson.key
-    return f"{CAL_UID_PREFIX}{base}"
-
-
-def calendar_summary(lesson: Lesson) -> str:
-    prefix = "⚠️ " if lesson.status == IRREGULAR else ""
-    return f"{prefix}{lesson.title}"
-
-
-def calendar_description(lesson: Lesson) -> str:
-    parts = []
-    if lesson.teachers:
-        parts.append("Lehrkraft: " + ", ".join(lesson.teachers))
-    if lesson.group:
-        parts.append("Gruppe: " + lesson.group)
-    if lesson.note:
-        parts.append(lesson.note)
-    parts.append("(automatisch von untisbot synchronisiert)")
-    return "\n".join(parts)
-
-
-def plan_calendar_sync(
-    lessons: Sequence[Lesson], existing_uids: Iterable[str]
-) -> tuple[list[Lesson], set[str]]:
-    """Reine Funktion: was muss angelegt/aktualisiert, was geloescht werden.
-
-    Ausgefallene Stunden werden nie gewuenscht -- fehlen sie im Kalender
-    schon, passiert nichts; sind sie noch da (von vor dem Ausfall), werden
-    sie zum Loeschen vorgemerkt.
-    """
-    wanted = {lesson_uid(l): l for l in lessons if l.status != CANCELLED}
-    to_delete = {
-        uid for uid in existing_uids
-        if uid.startswith(CAL_UID_PREFIX) and uid not in wanted
-    }
-    return list(wanted.values()), to_delete
-
-
-def build_ics_event(lesson: Lesson, tz_name: str) -> bytes:
-    """Baut den VEVENT-Block fuer eine einzelne Stunde.
-
-    add_missing_timezones() ergaenzt den VTIMEZONE-Block -- ohne ihn ist das
-    ICS zwar von den meisten Clients lesbar, aber nicht RFC-5545-konform,
-    und strengere CalDAV-Server (iCloud eingeschlossen) koennen den PUT
-    ablehnen.
-    """
-    from icalendar import Calendar, Event
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo(tz_name)
-    start = dt.datetime.combine(lesson.day, dt.time.fromisoformat(lesson.start), tzinfo=tz)
-    end = dt.datetime.combine(lesson.day, dt.time.fromisoformat(lesson.end), tzinfo=tz)
-
-    cal = Calendar()
-    cal.add("prodid", "-//untisbot//DE")
-    cal.add("version", "2.0")
-
-    event = Event()
-    event.add("uid", lesson_uid(lesson))
-    event.add("summary", calendar_summary(lesson))
-    event.add("dtstart", start)
-    event.add("dtend", end)
-    event.add("description", calendar_description(lesson))
-    if lesson.rooms:
-        event.add("location", ", ".join(lesson.rooms))
-    event.add("dtstamp", dt.datetime.now(dt.timezone.utc))
-    cal.add_component(event)
-    cal.add_missing_timezones()
-    return cal.to_ical()
-
-
-def _event_fingerprint(ics: bytes | str) -> str:
-    """Vergleichbarer Inhalt eines Termins, ohne die bei jedem Bau neue
-    DTSTAMP-Zeile.
-
-    Ohne diesen Vergleich wuerde jede der ~50 Stunden im Fenster bei JEDEM
-    5-Minuten-Lauf neu geschrieben -- mehrere hundert Schreibzugriffe pro
-    Stunde gegen Apples Server, dauerhaft, auch wenn sich nichts aendert.
-    """
-    text = ics.decode("utf-8") if isinstance(ics, bytes) else ics
-    lines = [ln for ln in text.splitlines() if not ln.startswith("DTSTAMP")]
-    return "\n".join(lines)
-
-
-def get_calendar(cfg: Config):
-    """Findet den vom Nutzer angelegten Kalender per Namen.
-
-    Der Bot legt den Kalender bewusst NICHT selbst an -- der Nutzer muss ihn
-    einmal in der Kalender-App erstellen. Das ist eine kleine Huerde, aber
-    eine wichtige Sicherung: der Bot schreibt garantiert nur in einen
-    Kalender, den der Nutzer bewusst dafuer vorgesehen hat, nie versehentlich
-    in "Privat" oder "Familie".
-    """
-    import caldav
-
-    client = caldav.DAVClient(
-        url="https://caldav.icloud.com/",
-        username=cfg.icloud_user,
-        password=cfg.icloud_app_password,
-        timeout=30,   # sonst haengt ein zaeher iCloud-Request den Lauf ohne Ende
-    )
-    try:
-        principal = client.principal()
-        for calendar in principal.calendars():
-            if calendar.name == cfg.icloud_calendar_name:
-                return calendar
-    except Exception as exc:
-        raise CalendarError(f"iCloud-Verbindung fehlgeschlagen: {exc}") from exc
-
-    raise CalendarError(
-        f"Kalender '{cfg.icloud_calendar_name}' nicht gefunden. "
-        "Einmalig in der Kalender-App anlegen (unter dem iCloud-Account)."
-    )
-
-
-def sync_calendar(cfg: Config, lessons: Sequence[Lesson]) -> str:
-    """Gleicht den iCloud-Kalender mit dem aktuellen Fenster ab.
-
-    Jeder Termin wird einzeln abgesichert (try/except je Termin, nicht nur
-    einmal ums Ganze): Ein einzelner kaputter oder fremd erzeugter Termin im
-    selben Kalender soll den Abgleich der anderen 40+ Termine nicht
-    verhindern -- sonst wuerde ein einziger Ausreisser den Kalender-Abgleich
-    dauerhaft und stillschweigend lahmlegen, ohne dass es auffaellt.
-    """
-    calendar = get_calendar(cfg)
-    try:
-        events = calendar.events()
-    except Exception as exc:
-        raise CalendarError(f"Kalender-Abfrage fehlgeschlagen: {exc}") from exc
-
-    existing = {}
-    unlesbar = 0
-    for ev in events:
-        try:
-            component = ev.icalendar_component
-        except Exception as exc:
-            log.warning("Kalender-Termin nicht lesbar, wird uebersprungen: %s", exc)
-            unlesbar += 1
-            continue
-        if component is None:
-            continue
-        uid = str(component.get("uid", ""))
-        if uid:
-            existing[uid] = ev
-
-    to_upsert, to_delete = plan_calendar_sync(lessons, existing.keys())
-
-    created = updated = skipped = deleted = failed = 0
-    for lesson in to_upsert:
-        uid = lesson_uid(lesson)
-        ics = build_ics_event(lesson, cfg.timezone)
-        try:
-            if uid in existing:
-                if _event_fingerprint(ics) == _event_fingerprint(existing[uid].data):
-                    skipped += 1
-                    continue
-                existing[uid].data = ics
-                existing[uid].save()
-                updated += 1
-            else:
-                calendar.save_event(ics)
-                created += 1
-        except Exception as exc:
-            log.warning("Termin '%s' konnte nicht geschrieben werden: %s", uid, exc)
-            failed += 1
-
-    for uid in to_delete:
-        try:
-            existing[uid].delete()
-            deleted += 1
-        except Exception as exc:
-            log.warning("Termin '%s' konnte nicht geloescht werden: %s", uid, exc)
-            failed += 1
-
-    msg = f"{created} neu, {updated} aktualisiert, {skipped} unveraendert, {deleted} geloescht"
-    if failed or unlesbar:
-        msg += f" ({failed} Fehler, {unlesbar} unlesbar)"
-    return msg
-
-
-def sync_calendar_safe(cfg: Config, lessons: Sequence[Lesson]) -> None:
-    """Kalender-Abgleich darf den Lauf nie zum Scheitern bringen.
-
-    Telegram ist die Hauptaufgabe, der Kalender eine Zusatzfunktion. Ein
-    iCloud-Ausfall soll weder die Stundenplan-Meldung verhindern noch den
-    Job rot werden lassen und Fehler-Mails ausloesen.
-    """
-    if not cfg.icloud_enabled:
-        return
-    try:
-        result = sync_calendar(cfg, lessons)
-        log.info("Kalender abgeglichen: %s", result)
-    except Exception as exc:
-        log.error("Kalender-Abgleich fehlgeschlagen: %s", exc)
-
-
-# ===========================================================================
 #  Ablauf
 # ===========================================================================
 
@@ -1905,7 +1664,6 @@ def check_once(cfg: Config, dry_run: bool = False,
     # gespeicherten Stunden als verschwunden.
     if previous.exists and compare_win is None:
         if not dry_run:
-            sync_calendar_safe(cfg, lessons)
             save_state(lessons, win, state_path)
             commit_state(state_path)
         return Result(OK, message="Fenster komplett verschoben -- neu grundiert")
@@ -1944,11 +1702,6 @@ def check_once(cfg: Config, dry_run: bool = False,
         log.warning("Grossflaechige Aenderung bestaetigt (%d. Sichtung): %s",
                     seen, exc)
         bulk_note = "Der Stundenplan hat sich großflächig geändert."
-
-    # -- Kalender abgleichen. Volle Rekonziliation mit dem frischen Fenster,
-    #    unabhaengig vom Diff/Telegram-Pfad darunter -- siehe Modul-Kommentar.
-    if not dry_run:
-        sync_calendar_safe(cfg, lessons)
 
     # -- Erstlauf: nur merken, nicht fluten
     if not previous.exists:
@@ -2098,18 +1851,6 @@ def selftest(cfg: Config) -> int:
         print(f"  [NEIN] {str(exc).splitlines()[0]}")
         ok = False
 
-    if cfg.icloud_enabled:
-        print(f"iCloud-Kalender  {cfg.icloud_user} -> '{cfg.icloud_calendar_name}'")
-        try:
-            calendar = get_calendar(cfg)
-            count = len(calendar.events())
-            print(f"  [ja  ] Kalender gefunden, {count} Termine darin")
-        except Exception as exc:
-            print(f"  [NEIN] {str(exc).splitlines()[0]}")
-            ok = False
-    else:
-        print("iCloud-Kalender  nicht eingerichtet (optional)")
-
     print("=" * 58)
     print("Alles in Ordnung." if ok else "Mindestens ein Zugang ist kaputt.")
     return 0 if ok else 1
@@ -2162,10 +1903,10 @@ def diagnose_lines(cfg: Config) -> list[str]:
     """Kurzer Befund fuer den Fuss der Testnachricht.
 
     Der eigentliche Zweck der Testnachricht ist das Format -- aber solange
-    sie ohnehin laeuft, beantwortet sie die zwei Fragen gleich mit, die man
-    dem Bot im Betrieb sonst NICHT ansieht: ob die Schule das Stundenraster
-    herausgibt (ohne das bleibt es bei Uhrzeiten) und ob der Kalender
-    ueberhaupt eingerichtet ist. Beides faellt sonst lautlos aus.
+    sie ohnehin laeuft, beantwortet sie die Frage gleich mit, die man dem
+    Bot im Betrieb sonst NICHT ansieht: ob die Schule das Stundenraster
+    herausgibt. Tut sie es nicht, faellt das lautlos aus -- es bleibt bei
+    Uhrzeiten, und niemand merkt es.
     """
     zeilen = ["", "<i>— Befund —</i>"]
 
@@ -2185,12 +1926,6 @@ def diagnose_lines(cfg: Config) -> list[str]:
                       "Uhrzeiten statt Stundennummern und fassen keine "
                       "Doppelstunden zusammen.</i>")
 
-    if cfg.icloud_enabled:
-        zeilen.append(f"<i>iCloud-Kalender: eingerichtet "
-                      f"('{esc(cfg.icloud_calendar_name)}').</i>")
-    else:
-        zeilen.append("<i>iCloud-Kalender: nicht eingerichtet — es wird nichts "
-                      "synchronisiert.</i>")
     return zeilen
 
 
