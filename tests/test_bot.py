@@ -1024,8 +1024,38 @@ def test_gruppierung_leere_liste():
     assert bot.group_doppelstunden([], RASTER) == []
 
 
-def test_block_label_einzelstunde_zeigt_uhrzeit():
+def test_gruppierung_liefert_gruppen_in_sortierter_reihenfolge():
+    """Invariante, auf die build_entries() baut: Die Gruppen kommen nach
+    sort_key geordnet -- also je Block die wichtigste Aenderung zuerst.
+    Faellt die Sortierung am Ende von group_doppelstunden() weg, traegt
+    ein gebuendelter Eintrag das falsche Symbol."""
+    aenderungen = [Change("room", lesson(uid=1, start="10:25"), "R1 → R2"),
+                   Change("cancelled", lesson(uid=2, start="07:40")),
+                   Change("teacher", lesson(uid=3, start="10:25"), "Abel → Zeh")]
+    gruppen = bot.group_doppelstunden(aenderungen, RASTER)
+    schluessel = [g[0].sort_key for g in gruppen]
+    assert schluessel == sorted(schluessel)
+
+
+def test_block_label_einzelstunde_zeigt_stundennummer():
     gruppe = [Change("cancelled", lesson(start="07:40"))]
+    assert bot.block_label(gruppe, RASTER) == "1. Stunde"
+
+
+def test_block_label_einzelstunde_spaeter_am_tag():
+    gruppe = [Change("cancelled", lesson(start="12:20"))]
+    assert bot.block_label(gruppe, RASTER) == "6. Stunde"
+
+
+def test_block_label_einzelstunde_quer_zum_raster_zeigt_uhrzeit():
+    """Sondertermine (Klausuren, Exkursionen) liegen oft nicht auf einem
+    Rasterbeginn -- dann ist die Uhrzeit die einzige ehrliche Angabe."""
+    gruppe = [Change("added", lesson(start="13:30"))]
+    assert bot.block_label(gruppe, RASTER) == "13:30"
+
+
+def test_block_label_einzelstunde_an_tag_ohne_raster():
+    gruppe = [Change("cancelled", lesson(date="2026-09-19", start="07:40"))]
     assert bot.block_label(gruppe, RASTER) == "07:40"
 
 
@@ -1050,6 +1080,195 @@ def test_block_label_einzelstunde_ohne_raster():
 # ===========================================================================
 
 HEUTE = dt.date(2026, 9, 14)
+
+
+# ===========================================================================
+#  Eintraege -- Buendelung mehrerer Aenderungsarten derselben Stunde
+# ===========================================================================
+
+def test_entry_einzelne_aenderung():
+    eintraege = bot.build_entries([Change("cancelled", lesson())], RASTER)
+    assert len(eintraege) == 1
+    assert eintraege[0].label == "1. Stunde"
+    assert eintraege[0].title == "M"
+
+
+def test_entry_leere_liste():
+    assert bot.build_entries([], RASTER) == []
+
+
+def test_entry_buendelt_vertretung_und_raumwechsel():
+    """Der haeufigste echte Fall: compare() liefert zwei Change-Objekte
+    fuer dieselbe Stunde -- die gehoeren in EINEN Eintrag."""
+    aenderungen = [Change("teacher", lesson(uid=1), "Abel → Zeh"),
+                   Change("room", lesson(uid=1), "R1 → R2")]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert len(eintraege) == 1
+    assert eintraege[0].labels == "Vertretung, Raumwechsel"
+
+
+def test_entry_buendelt_auch_ueber_eine_doppelstunde():
+    aenderungen = [
+        Change("teacher", lesson(uid=1, start="07:40"), "Abel → Zeh"),
+        Change("room", lesson(uid=1, start="07:40"), "R1 → R2"),
+        Change("teacher", lesson(uid=2, start="08:30"), "Abel → Zeh"),
+        Change("room", lesson(uid=2, start="08:30"), "R1 → R2"),
+    ]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert len(eintraege) == 1
+    assert eintraege[0].label == "1./2. Stunde"
+    assert eintraege[0].labels == "Vertretung, Raumwechsel"
+
+
+def test_entry_arten_nach_wichtigkeit_sortiert():
+    """KINDS ist nach Wichtigkeit sortiert -- die Eingabereihenfolge darf
+    keine Rolle spielen."""
+    aenderungen = [Change("room", lesson(uid=1), "R1 → R2"),
+                   Change("subject", lesson(uid=1), "M → D"),
+                   Change("teacher", lesson(uid=1), "Abel → Zeh")]
+    eintrag = bot.build_entries(aenderungen, RASTER)[0]
+    assert eintrag.labels == "Fachwechsel, Vertretung, Raumwechsel"
+
+
+def test_entry_lead_bestimmt_das_symbol():
+    """Bei 'Vertretung + Raumwechsel' soll 👤 stehen, nicht 🚪."""
+    aenderungen = [Change("room", lesson(uid=1), "R1 → R2"),
+                   Change("teacher", lesson(uid=1), "Abel → Zeh")]
+    assert bot.build_entries(aenderungen, RASTER)[0].lead.kind == "teacher"
+
+
+def test_entry_details_in_derselben_reihenfolge():
+    aenderungen = [Change("room", lesson(uid=1), "R1 → R2"),
+                   Change("teacher", lesson(uid=1), "Abel → Zeh")]
+    assert bot.build_entries(aenderungen, RASTER)[0].details == \
+           ["Abel → Zeh", "R1 → R2"]
+
+
+def test_entry_details_ueberspringt_leere():
+    aenderungen = [Change("teacher", lesson(uid=1), ""),
+                   Change("room", lesson(uid=1), "R1 → R2")]
+    assert bot.build_entries(aenderungen, RASTER)[0].details == ["R1 → R2"]
+
+
+def test_entry_details_entfernt_dopplungen():
+    """Zweimal dieselbe Zeile untereinander sieht nach einem Fehler aus."""
+    aenderungen = [Change("teacher", lesson(uid=1), "A → B"),
+                   Change("room", lesson(uid=1), "A → B")]
+    assert bot.build_entries(aenderungen, RASTER)[0].details == ["A → B"]
+
+
+def test_entry_trennt_aenderungen_mit_unterschiedlicher_reichweite():
+    """Vertretung ueber beide Stunden, Raumwechsel nur in der ersten: Ein
+    gemeinsamer Eintrag wuerde behaupten, der Raum habe sich in beiden
+    Stunden geaendert."""
+    aenderungen = [
+        Change("teacher", lesson(uid=1, start="07:40"), "Abel → Zeh"),
+        Change("teacher", lesson(uid=2, start="08:30"), "Abel → Zeh"),
+        Change("room", lesson(uid=1, start="07:40"), "R1 → R2"),
+    ]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert [(e.label, e.labels) for e in eintraege] == \
+           [("1./2. Stunde", "Vertretung"), ("1. Stunde", "Raumwechsel")]
+
+
+def test_entry_trennt_verschiedene_faecher_zur_selben_zeit():
+    """Parallelkurse -- gleiche Stunde, aber nichts miteinander zu tun."""
+    aenderungen = [Change("room", lesson(uid=1, subjects=("SpA",)), "Halle → Platz"),
+                   Change("room", lesson(uid=2, subjects=("SpB",)), "Platz → Halle")]
+    assert len(bot.build_entries(aenderungen, RASTER)) == 2
+
+
+def test_entry_trennt_verschiedene_tage():
+    aenderungen = [Change("room", lesson(uid=1, date=MO), "R1 → R2"),
+                   Change("teacher", lesson(uid=2, date=DI), "Abel → Zeh")]
+    assert len(bot.build_entries(aenderungen, RASTER)) == 2
+
+
+def test_entry_chronologisch_sortiert():
+    aenderungen = [Change("room", lesson(uid=1, date=DI, start="07:40"), "a → b"),
+                   Change("cancelled", lesson(uid=2, date=MO, start="10:25")),
+                   Change("cancelled", lesson(uid=3, date=MO, start="07:40"))]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert [(e.date, e.label) for e in eintraege] == \
+           [(MO, "1. Stunde"), (MO, "4. Stunde"), (DI, "1. Stunde")]
+
+
+def test_entry_verliert_keine_art():
+    aenderungen = [Change("subject", lesson(uid=1), "M → D"),
+                   Change("teacher", lesson(uid=1), "Abel → Zeh"),
+                   Change("room", lesson(uid=1), "R1 → R2"),
+                   Change("added", lesson(uid=2, start="08:30", subjects=("Sp",)))]
+    arten = {c.kind for e in bot.build_entries(aenderungen, RASTER) for c in e.changes}
+    assert arten == {"subject", "teacher", "room", "added"}
+
+
+def test_entry_buendelt_auch_ohne_raster():
+    """Ohne Raster dient die Uhrzeit als Blockkennung -- die Buendelung
+    funktioniert trotzdem, nur eben je Einzelstunde."""
+    aenderungen = [Change("teacher", lesson(uid=1), "Abel → Zeh"),
+                   Change("room", lesson(uid=1), "R1 → R2")]
+    eintraege = bot.build_entries(aenderungen, {})
+    assert len(eintraege) == 1 and eintraege[0].label == "07:40"
+
+
+def test_entry_ist_unveraenderlich():
+    eintrag = bot.build_entries([Change("cancelled", lesson())], RASTER)[0]
+    with pytest.raises(Exception):
+        eintrag.label = "anders"
+
+
+def test_entry_sort_key_nimmt_den_blockbeginn():
+    aenderungen = [Change("teacher", lesson(uid=1, start="07:40"), "Abel → Zeh"),
+                   Change("teacher", lesson(uid=2, start="08:30"), "Abel → Zeh")]
+    assert bot.build_entries(aenderungen, RASTER)[0].sort_key[1] == "07:40"
+
+
+def test_render_zeigt_gebuendelte_arten_in_einer_zeile():
+    aenderungen = [Change("teacher", lesson(uid=1), "Abel → Zeh"),
+                   Change("room", lesson(uid=1), "R1 → R2")]
+    text = bot.render(aenderungen, HEUTE, periods=RASTER)
+    assert "Vertretung, Raumwechsel" in text
+    assert text.count("1. Stunde") == 1
+
+
+def test_render_zeigt_alle_details_des_eintrags():
+    aenderungen = [Change("teacher", lesson(uid=1), "Abel → Zeh"),
+                   Change("room", lesson(uid=1), "R1 → R2")]
+    text = bot.render(aenderungen, HEUTE, periods=RASTER)
+    assert "<i>Abel → Zeh</i>" in text and "<i>R1 → R2</i>" in text
+
+
+def test_render_nutzt_symbol_der_wichtigsten_art():
+    aenderungen = [Change("room", lesson(uid=1), "R1 → R2"),
+                   Change("cancelled", lesson(uid=1), "krank")]
+    text = bot.render(aenderungen, HEUTE, periods=RASTER)
+    assert "❌" in text and "🚪" not in text
+
+
+def test_render_zeigt_stundennummer_bei_einzelaenderung():
+    text = bot.render([Change("room", lesson(start="12:20"), "R1 → R2")],
+                      HEUTE, periods=RASTER)
+    assert "6. Stunde" in text and "12:20" not in text
+
+
+def test_render_bleibt_bei_uhrzeit_ohne_raster():
+    text = bot.render([Change("room", lesson(start="12:20"), "R1 → R2")], HEUTE)
+    assert "<b>12:20</b>" in text
+    assert ". Stunde" not in text   # nicht auf "Stunde" pruefen -- steckt in der Ueberschrift
+
+
+def test_render_vollstaendiges_szenario_wird_kuerzer():
+    """Der Praxisnutzen in einer Zahl."""
+    aenderungen = [
+        Change("cancelled", lesson(uid=1, start="07:40"), "krank"),
+        Change("cancelled", lesson(uid=2, start="08:30"), "krank"),
+        Change("teacher", lesson(uid=3, start="09:35", subjects=("D",)), "Abel → Zeh"),
+        Change("room", lesson(uid=3, start="09:35", subjects=("D",)), "R1 → R2"),
+        Change("teacher", lesson(uid=4, start="10:25", subjects=("D",)), "Abel → Zeh"),
+        Change("room", lesson(uid=4, start="10:25", subjects=("D",)), "R1 → R2"),
+    ]
+    assert len(bot.build_entries(aenderungen, RASTER)) == 2
+    assert len(bot.build_entries(aenderungen, {})) == 4
 
 
 def test_render_ohne_aenderungen_ist_leer():

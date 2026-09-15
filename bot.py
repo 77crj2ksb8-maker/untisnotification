@@ -981,13 +981,113 @@ def group_doppelstunden(
 
 
 def block_label(group: Sequence[Change], periods: Periods) -> str:
-    """'07:40' fuer eine Einzelstunde, '1./2. Stunde' fuer einen Block."""
+    """'1. Stunde' fuer eine Einzelstunde, '1./2. Stunde' fuer einen Block.
+
+    Die Uhrzeit bleibt der Rueckfall, wenn das Raster fehlt oder die Stunde
+    nicht darin steht (Sondertermine liegen oft quer zum Raster). Frueher
+    stand bei Einzelstunden IMMER die Uhrzeit -- in einer Nachricht, die
+    daneben "1./2. Stunde" schreibt, las sich das wie zwei verschiedene
+    Arten von Angabe. Jetzt ist es dieselbe Sprache wie im Stundenplan,
+    und die Uhrzeit erscheint nur noch dort, wo es nichts Besseres gibt.
+    """
     if len(group) == 1:
-        return group[0].lesson.start
+        name = period_name(group[0].lesson, periods)
+        return f"{name}. Stunde" if name else group[0].lesson.start
     names = [period_name(c.lesson, periods) for c in group]
     if len(group) == 2:
         return f"{names[0]}./{names[1]}. Stunde"
     return f"{names[0]}.–{names[-1]}. Stunde"
+
+
+@dataclass(frozen=True)
+class Entry:
+    """Ein Eintrag der Nachricht: eine Stunde -- oder ein Doppelstunden-
+    Block -- mit allem, was sich daran geaendert hat.
+
+    Warum das noetig ist: Eine Vertretung MIT Raumwechsel liefert aus
+    compare() zwei Change-Objekte fuer dieselbe Stunde. Ohne diese
+    Buendelung stuende der Block zweimal untereinander in der Nachricht,
+    mit identischer Zeit und identischem Fach -- ausgerechnet der
+    haeufigste echte Fall saehe damit am unuebersichtlichsten aus.
+    """
+
+    label: str                    # "1./2. Stunde" oder, ohne Raster, "07:40"
+    date: str
+    title: str
+    changes: tuple[Change, ...]   # nach Wichtigkeit sortiert, siehe KINDS
+
+    @property
+    def lead(self) -> Change:
+        """Die wichtigste Aenderung -- sie bestimmt das Symbol.
+
+        Bei "Vertretung + Raumwechsel" soll 👤 stehen, nicht 🚪: Wer
+        vertritt, ist die groessere Nachricht als wo.
+        """
+        return self.changes[0]
+
+    @property
+    def labels(self) -> str:
+        return ", ".join(LABELS.get(c.kind, c.kind) for c in self.changes)
+
+    @property
+    def details(self) -> list[str]:
+        """Die Erlaeuterungen, ohne Leere und ohne Dopplungen.
+
+        Zwei Aenderungen desselben Blocks koennen denselben Text tragen
+        (etwa ein Raumwechsel R1 -> R2 neben einem Lehrerwechsel, dessen
+        Kuerzel zufaellig gleich lauten). Zweimal dieselbe Zeile
+        untereinander sieht nach einem Fehler aus.
+        """
+        gesehen: list[str] = []
+        for change in self.changes:
+            if change.detail and change.detail not in gesehen:
+                gesehen.append(change.detail)
+        return gesehen
+
+    @property
+    def sort_key(self) -> tuple:
+        return min(c.sort_key for c in self.changes)
+
+
+def build_entries(changes: Sequence[Change], periods: Periods) -> list[Entry]:
+    """Verdichtet die Aenderungen zu den Eintraegen der Nachricht.
+
+    Zwei Stufen, und die Reihenfolge ist nicht vertauschbar:
+
+      1. group_doppelstunden() fasst GLEICHARTIGE Aenderungen lueckenlos
+         aufeinanderfolgender Stunden zu einem Block zusammen.
+      2. Hier werden die verschiedenen ARTEN desselben Blocks gebuendelt.
+
+    Erst nach Stufe 1 steht fest, welche Bloecke es ueberhaupt gibt --
+    und die koennen je Art unterschiedlich weit reichen: Eine Vertretung
+    laeuft vielleicht ueber beide Stunden, der Raumwechsel nur ueber die
+    erste. Deshalb geht das Label (also der Block) in den Schluessel ein
+    und nicht bloss die Stunde: Aenderungen mit unterschiedlicher
+    Reichweite bleiben getrennte Eintraege, sonst wuerde die Nachricht
+    behaupten, der Raum habe sich in beiden Stunden geaendert.
+    """
+    blocks: dict[tuple, list[Change]] = {}
+    for group in group_doppelstunden(changes, periods):
+        key = (group[0].lesson.date, block_label(group, periods),
+               group[0].lesson.title)
+        # group[0] vertritt den ganzen Block -- die uebrigen Mitglieder sind
+        # nach Konstruktion wortgleich, genau das war der Sinn von Stufe 1.
+        blocks.setdefault(key, []).append(group[0])
+
+    entries = []
+    for (date, label, title), members in blocks.items():
+        # Heute redundant -- group_doppelstunden() liefert bereits nach
+        # sort_key geordnet, und alle Mitglieder eines Eintrags teilen sich
+        # Tag und Blockbeginn, unterscheiden sich also nur im Rang. Die
+        # Sortierung steht hier trotzdem: Von ihr haengt ab, welches Symbol
+        # der Eintrag traegt und in welcher Reihenfolge die Arten stehen --
+        # das soll nicht daran haengen, wie eine andere Funktion sortiert.
+        # Die Invariante selbst sichert
+        # test_gruppierung_liefert_gruppen_in_sortierter_reihenfolge.
+        members.sort(key=lambda c: c.sort_key)
+        entries.append(Entry(label, date, title, tuple(members)))
+    entries.sort(key=lambda e: e.sort_key)
+    return entries
 
 
 def render(changes: Sequence[Change], today: dt.date,
@@ -995,11 +1095,14 @@ def render(changes: Sequence[Change], today: dt.date,
            periods: Periods | None = None) -> str:
     """Baut die Telegram-Nachricht, nach Tagen gruppiert.
 
-    Mit periods (dem offiziellen Stundenraster) werden lueckenlos
-    aufeinanderfolgende gleichartige Aenderungen als Doppelstunden-Block
-    zusammengefasst ("1./2. Stunde" statt zwei fast identischer Zeilen).
-    Ohne periods (None oder leer) verhaelt es sich wie zuvor: eine Zeile
-    je Aenderung.
+    Je Eintrag eine Stunde beziehungsweise ein Doppelstunden-Block, mit
+    allen Aenderungsarten daran gebuendelt -- siehe build_entries().
+
+    Mit periods (dem offiziellen Stundenraster) tragen die Eintraege
+    Schulstunden-Nummern ("1./2. Stunde") und aufeinanderfolgende
+    gleichartige Aenderungen werden zusammengefasst. Ohne periods (None
+    oder leer) steht ueberall die Uhrzeit und es wird nichts
+    zusammengefasst -- jede Stunde bleibt ein eigener Eintrag.
     """
     if not changes:
         return ""
@@ -1007,30 +1110,24 @@ def render(changes: Sequence[Change], today: dt.date,
     if len(changes) >= BULK_THRESHOLD:
         return render_summary(changes, today, bulk_note)
 
-    groups = group_doppelstunden(changes, periods or {})
-
     lines = [f"<b>{esc(header)}</b>"]
     if bulk_note:
         lines.append(f"<i>{esc(bulk_note)}</i>")
     current: str | None = None
 
-    for group in groups:
-        first = group[0]
-        lesson = first.lesson
-        if lesson.date != current:
-            current = lesson.date
+    for entry in build_entries(changes, periods or {}):
+        if entry.date != current:
+            current = entry.date
             rel = relative(current, today)
             suffix = f" <i>({rel})</i>" if rel else ""
             lines.append("")
             lines.append(f"<b>{esc(day_header(current))}</b>{suffix}")
 
-        icon = ICONS.get(first.kind, "•")
-        label = LABELS.get(first.kind, first.kind)
-        zeit = block_label(group, periods or {})
-        lines.append(f"{icon} <b>{esc(zeit)}</b> "
-                     f"{esc(lesson.title)} — {esc(label)}")
-        if first.detail:
-            lines.append(f"    <i>{esc(first.detail)}</i>")
+        icon = ICONS.get(entry.lead.kind, "•")
+        lines.append(f"{icon} <b>{esc(entry.label)}</b> · "
+                     f"{esc(entry.title)} — {esc(entry.labels)}")
+        for detail in entry.details:
+            lines.append(f"    <i>{esc(detail)}</i>")
 
     return "\n".join(lines)
 
