@@ -1,0 +1,17 @@
+# Zugangsdaten -- duerfen nie ins Repo, das oeffentlich ist.
+.env
+
+# state.json steht hier bewusst drin: lokal soll ein Testlauf den
+# Zustand nicht versehentlich mitcommitten. In der Cloud ist genau das
+# der Sinn -- deshalb nutzt commit_state() dort "git add -f".
+# Bereits versionierte Dateien bleiben davon unberuehrt, die auf GitHub
+# gepflegte state.json bleibt also getrackt.
+state.json
+state.broken
+state.json.*.tmp
+
+# Python-Kram
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

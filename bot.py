@@ -74,6 +74,14 @@ class Config:
     untis_klasse: str = ""
     lookahead_days: int = 7
     timezone: str = "Europe/Berlin"
+    icloud_user: str = ""
+    icloud_app_password: str = ""
+    icloud_calendar_name: str = "Stundenplan"
+
+    @property
+    def icloud_enabled(self) -> bool:
+        """Kalender-Abgleich ist optional -- an, sobald beide Werte gesetzt sind."""
+        return bool(self.icloud_user and self.icloud_app_password)
 
     @staticmethod
     def from_env() -> "Config":
@@ -123,6 +131,9 @@ class Config:
             untis_klasse=maybe("WEBUNTIS_KLASSE"),
             lookahead_days=max(1, min(days, 30)),
             timezone=maybe("TIMEZONE", "Europe/Berlin"),
+            icloud_user=maybe("ICLOUD_USERNAME"),
+            icloud_app_password=maybe("ICLOUD_APP_PASSWORD"),
+            icloud_calendar_name=maybe("ICLOUD_CALENDAR_NAME", "Stundenplan"),
         )
 
 
@@ -336,6 +347,12 @@ def normalise(period: Any, resolve: Callable[[str, Iterable], tuple[str, ...]]) 
     )
 
 
+#: Prozessweiter Cache fuer Untis.timegrid(), Schluessel (Server, Schule).
+#: Siehe Docstring dort -- das Raster ist ueber ein Schuljahr praktisch
+#: konstant, ein neuer GitHub-Actions-Lauf startet ohnehin frisch.
+_TIMEGRID_CACHE: dict[tuple[str, str], dict[int, list[tuple[str, str, str]]]] = {}
+
+
 class Untis:
     """Duenne Huelle um die webuntis-Bibliothek.
 
@@ -428,6 +445,47 @@ class Untis:
         except Exception as exc:
             log.debug("Schuljahre nicht abrufbar: %s", exc)
             return []
+
+    def timegrid(self) -> dict[int, list[tuple[str, str, str]]]:
+        """Offizielles Stundenraster: Wochentag -> [(Start, Ende, Name), ...].
+
+        Wochentag als Python-Zaehlung (Montag=0), sortiert nach Start.
+        Der Name ("1", "2", ...) ist die Schulstunden-Nummer -- daraus
+        werden Doppelstunden erkannt und beschriftet.
+
+        Liefert ein leeres dict, wenn der Abruf scheitert (fehlende Rechte,
+        Netzfehler, oder eine kaputte Zeile darin) -- der Aufrufer faellt
+        dann auf Einzelzeilen ohne Doppelstunden-Zusammenfassung zurueck,
+        statt den ganzen Lauf zu gefaehrden.
+
+        Pro Prozess einmal geholt und dann zwischengespeichert: Das Raster
+        aendert sich innerhalb eines Schuljahres praktisch nie, aber
+        watch() ruft check_once() rund zwoelfmal pro Stunde auf -- ohne
+        Cache waeren elf von zwoelf Abrufen reine Verschwendung. Ein neuer
+        GitHub-Actions-Lauf startet ohnehin einen frischen Prozess, der
+        Cache veraltet also von selbst nach spaetestens einer Stunde.
+        """
+        cache_key = (self.cfg.untis_server, self.cfg.untis_school)
+        if cache_key in _TIMEGRID_CACHE:
+            return _TIMEGRID_CACHE[cache_key]
+
+        try:
+            days = self._session.timegrid_units()
+            grid: dict[int, list[tuple[str, str, str]]] = {}
+            for day in days:
+                weekday = (day.day - 2) % 7   # WebUntis: 1=So..7=Sa -> Python: 0=Mo
+                units = sorted(
+                    ((u.start.strftime("%H:%M"), u.end.strftime("%H:%M"), str(u.name))
+                     for u in day.time_units),
+                    key=lambda u: u[0],
+                )
+                grid[weekday] = units
+        except Exception as exc:
+            log.debug("Stundenraster nicht abrufbar: %s", exc)
+            return {}   # bewusst NICHT gecacht -- naechster Poll darf's erneut versuchen
+
+        _TIMEGRID_CACHE[cache_key] = grid
+        return grid
 
     def clamp(self, start: dt.date, end: dt.date) -> tuple[dt.date, dt.date]:
         """Beschneidet das Fenster auf ein einzelnes Schuljahr.
@@ -842,23 +900,123 @@ def relative(date: str, today: dt.date) -> str:
 #: Plan ist neu" steckt ohnehin in der Zahl.
 BULK_THRESHOLD = 40
 
+#: Wochentag (Python-Zaehlung, Montag=0) -> [(Start, Ende, Stundenname), ...],
+#: sortiert nach Start. Kommt von Untis.timegrid(); leer, wenn nicht abrufbar.
+Periods = dict[int, list[tuple[str, str, str]]]
+
+
+def period_index(lesson: Lesson, periods: Periods) -> int | None:
+    """Position der Stunde im Tagesraster, oder None ohne Treffer."""
+    for i, (start, _end, _name) in enumerate(periods.get(lesson.day.weekday(), [])):
+        if start == lesson.start:
+            return i
+    return None
+
+
+def period_name(lesson: Lesson, periods: Periods) -> str | None:
+    idx = period_index(lesson, periods)
+    if idx is None:
+        return None
+    return periods[lesson.day.weekday()][idx][2]
+
+
+def _consecutive(a: Change, b: Change, periods: Periods) -> bool:
+    """True, wenn b's Stunde im Raster direkt auf a's folgt (keine
+    Freistunde dazwischen)."""
+    ia, ib = period_index(a.lesson, periods), period_index(b.lesson, periods)
+    return ia is not None and ib is not None and ib == ia + 1
+
+
+def group_doppelstunden(
+    changes: Sequence[Change], periods: Periods
+) -> list[list[Change]]:
+    """Fasst lueckenlos aufeinanderfolgende, gleichartige Aenderungen zu
+    einem Block zusammen -- eine Doppelstunde soll als EIN Eintrag
+    erscheinen, nicht als zwei wortgleiche Zeilen.
+
+    Erst nach (Tag, Art, Detail, Fach) bucketn, DANACH innerhalb jedes
+    Buckets nach Perioden-Index verketten -- nicht einfach benachbarte
+    Listeneintraege pruefen. Grund: Eine Vertretung MIT Raumwechsel liefert
+    aus compare() zwei Change-Objekte pro Stunde (kind="teacher" und
+    kind="room"), also fuer eine Doppelstunde die Reihenfolge
+    [teacher@1, room@1, teacher@2, room@2] -- da liegen die beiden
+    zusammengehoerigen teacher-Aenderungen nie nebeneinander. Reine
+    Listen-Nachbarschaft haette die Zusammenfassung damit ausgerechnet im
+    haeufigsten Fall (Vertretung) nie ausgeloest.
+
+    "Lueckenlos" heisst: im offiziellen Stundenraster ohne freie Stunde
+    dazwischen -- nicht einfach Ende==Start, denn zwischen zwei Stunden
+    liegt fast immer eine Pause (z. B. Ende 1. Stunde 08:25, Beginn 2.
+    Stunde 08:30). Ohne das Raster wuerde entweder gar nichts zusammen-
+    gefasst (die Pause sieht wie eine Luecke aus) oder schlimmer, falsch
+    zusammengefasst (zwei zufaellig gleich benannte Stunden mit einer
+    echten Freistunde dazwischen). Deshalb: kein Raster verfuegbar (leeres
+    dict) -> es wird nie zusammengefasst, jede Aenderung bleibt eine
+    eigene Zeile -- identisch zum alten Verhalten ohne diese Funktion.
+    """
+    buckets: dict[tuple, list[Change]] = {}
+    order: list[tuple] = []
+    for change in changes:
+        key = (change.lesson.date, change.kind, change.detail, change.lesson.title)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(change)
+
+    groups: list[list[Change]] = []
+    for key in order:
+        bucket = sorted(buckets[key], key=lambda c: c.lesson.start)
+        chain: list[list[Change]] = []
+        for change in bucket:
+            if chain and _consecutive(chain[-1][-1], change, periods):
+                chain[-1].append(change)
+            else:
+                chain.append([change])
+        groups.extend(chain)
+
+    # Bucket-Reihenfolge war nach erstem Auftreten in `changes`, nicht mehr
+    # chronologisch -- fuer die Nachricht wieder nach sort_key ordnen.
+    groups.sort(key=lambda g: g[0].sort_key)
+    return groups
+
+
+def block_label(group: Sequence[Change], periods: Periods) -> str:
+    """'07:40' fuer eine Einzelstunde, '1./2. Stunde' fuer einen Block."""
+    if len(group) == 1:
+        return group[0].lesson.start
+    names = [period_name(c.lesson, periods) for c in group]
+    if len(group) == 2:
+        return f"{names[0]}./{names[1]}. Stunde"
+    return f"{names[0]}.–{names[-1]}. Stunde"
+
 
 def render(changes: Sequence[Change], today: dt.date,
-           header: str = "Stundenplan-Änderungen", bulk_note: str = "") -> str:
-    """Baut die Telegram-Nachricht, nach Tagen gruppiert."""
+           header: str = "Stundenplan-Änderungen", bulk_note: str = "",
+           periods: Periods | None = None) -> str:
+    """Baut die Telegram-Nachricht, nach Tagen gruppiert.
+
+    Mit periods (dem offiziellen Stundenraster) werden lueckenlos
+    aufeinanderfolgende gleichartige Aenderungen als Doppelstunden-Block
+    zusammengefasst ("1./2. Stunde" statt zwei fast identischer Zeilen).
+    Ohne periods (None oder leer) verhaelt es sich wie zuvor: eine Zeile
+    je Aenderung.
+    """
     if not changes:
         return ""
 
     if len(changes) >= BULK_THRESHOLD:
         return render_summary(changes, today, bulk_note)
 
+    groups = group_doppelstunden(changes, periods or {})
+
     lines = [f"<b>{esc(header)}</b>"]
     if bulk_note:
         lines.append(f"<i>{esc(bulk_note)}</i>")
     current: str | None = None
 
-    for change in changes:
-        lesson = change.lesson
+    for group in groups:
+        first = group[0]
+        lesson = first.lesson
         if lesson.date != current:
             current = lesson.date
             rel = relative(current, today)
@@ -866,12 +1024,13 @@ def render(changes: Sequence[Change], today: dt.date,
             lines.append("")
             lines.append(f"<b>{esc(day_header(current))}</b>{suffix}")
 
-        icon = ICONS.get(change.kind, "•")
-        label = LABELS.get(change.kind, change.kind)
-        lines.append(f"{icon} <b>{esc(lesson.start)}</b> "
+        icon = ICONS.get(first.kind, "•")
+        label = LABELS.get(first.kind, first.kind)
+        zeit = block_label(group, periods or {})
+        lines.append(f"{icon} <b>{esc(zeit)}</b> "
                      f"{esc(lesson.title)} — {esc(label)}")
-        if change.detail:
-            lines.append(f"    <i>{esc(change.detail)}</i>")
+        if first.detail:
+            lines.append(f"    <i>{esc(first.detail)}</i>")
 
     return "\n".join(lines)
 
@@ -1373,6 +1532,235 @@ def _commit_state(path: Path) -> bool:
 
 
 # ===========================================================================
+#  iCloud-Kalender  (I/O, optional)
+# ===========================================================================
+#
+# Abgleich passiert als volle Rekonziliation des Fensters bei jedem Lauf,
+# nicht als Uebersetzung einzelner Change-Objekte: Der Kalender soll immer
+# zeigen, was JETZT gilt -- unabhaengig davon, ob ein Lauf dazwischen
+# ausgefallen ist oder der Telegram-Versand geklappt hat. Das macht den
+# Abgleich selbst-heilend: ein verpasster Lauf repariert sich beim naechsten
+# von selbst, ohne dass Aenderungen einzeln nachvollzogen werden muessen.
+#
+# Ausfall heisst hier wirklich WEG, nicht durchgestrichen -- der Nutzer hat
+# explizit "bei Entfall geloescht" gewollt, nicht "als entfallen markiert".
+#
+# Nur Termine mit dem eigenen Praefix werden je geloescht oder ueberschrieben
+# -- eigene Kalendertermine des Nutzers im selben Kalender sind tabu, auch
+# wenn er versehentlich denselben Kalendernamen fuer anderes mitbenutzt.
+
+CAL_UID_PREFIX = "untisbot-"
+
+
+class CalendarError(RuntimeError):
+    """iCloud-Kalender nicht erreichbar oder falsch eingerichtet."""
+
+
+def lesson_uid(lesson: Lesson) -> str:
+    """Stabile Kalender-UID -- bleibt gleich, wenn sich nur Raum/Fach aendern.
+
+    Bevorzugt die WebUntis-id (ueberlebt reine Feldaenderungen). Fehlt sie
+    (Sonderfall ohne id), faellt es auf den fachlichen Schluessel zurueck --
+    weniger stabil bei Zeitverschiebung, aber immer noch eindeutig genug,
+    um doppelte Termine zu vermeiden.
+    """
+    base = str(lesson.uid) if lesson.uid is not None else lesson.key
+    return f"{CAL_UID_PREFIX}{base}"
+
+
+def calendar_summary(lesson: Lesson) -> str:
+    prefix = "⚠️ " if lesson.status == IRREGULAR else ""
+    return f"{prefix}{lesson.title}"
+
+
+def calendar_description(lesson: Lesson) -> str:
+    parts = []
+    if lesson.teachers:
+        parts.append("Lehrkraft: " + ", ".join(lesson.teachers))
+    if lesson.group:
+        parts.append("Gruppe: " + lesson.group)
+    if lesson.note:
+        parts.append(lesson.note)
+    parts.append("(automatisch von untisbot synchronisiert)")
+    return "\n".join(parts)
+
+
+def plan_calendar_sync(
+    lessons: Sequence[Lesson], existing_uids: Iterable[str]
+) -> tuple[list[Lesson], set[str]]:
+    """Reine Funktion: was muss angelegt/aktualisiert, was geloescht werden.
+
+    Ausgefallene Stunden werden nie gewuenscht -- fehlen sie im Kalender
+    schon, passiert nichts; sind sie noch da (von vor dem Ausfall), werden
+    sie zum Loeschen vorgemerkt.
+    """
+    wanted = {lesson_uid(l): l for l in lessons if l.status != CANCELLED}
+    to_delete = {
+        uid for uid in existing_uids
+        if uid.startswith(CAL_UID_PREFIX) and uid not in wanted
+    }
+    return list(wanted.values()), to_delete
+
+
+def build_ics_event(lesson: Lesson, tz_name: str) -> bytes:
+    """Baut den VEVENT-Block fuer eine einzelne Stunde.
+
+    add_missing_timezones() ergaenzt den VTIMEZONE-Block -- ohne ihn ist das
+    ICS zwar von den meisten Clients lesbar, aber nicht RFC-5545-konform,
+    und strengere CalDAV-Server (iCloud eingeschlossen) koennen den PUT
+    ablehnen.
+    """
+    from icalendar import Calendar, Event
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(tz_name)
+    start = dt.datetime.combine(lesson.day, dt.time.fromisoformat(lesson.start), tzinfo=tz)
+    end = dt.datetime.combine(lesson.day, dt.time.fromisoformat(lesson.end), tzinfo=tz)
+
+    cal = Calendar()
+    cal.add("prodid", "-//untisbot//DE")
+    cal.add("version", "2.0")
+
+    event = Event()
+    event.add("uid", lesson_uid(lesson))
+    event.add("summary", calendar_summary(lesson))
+    event.add("dtstart", start)
+    event.add("dtend", end)
+    event.add("description", calendar_description(lesson))
+    if lesson.rooms:
+        event.add("location", ", ".join(lesson.rooms))
+    event.add("dtstamp", dt.datetime.now(dt.timezone.utc))
+    cal.add_component(event)
+    cal.add_missing_timezones()
+    return cal.to_ical()
+
+
+def _event_fingerprint(ics: bytes | str) -> str:
+    """Vergleichbarer Inhalt eines Termins, ohne die bei jedem Bau neue
+    DTSTAMP-Zeile.
+
+    Ohne diesen Vergleich wuerde jede der ~50 Stunden im Fenster bei JEDEM
+    5-Minuten-Lauf neu geschrieben -- mehrere hundert Schreibzugriffe pro
+    Stunde gegen Apples Server, dauerhaft, auch wenn sich nichts aendert.
+    """
+    text = ics.decode("utf-8") if isinstance(ics, bytes) else ics
+    lines = [ln for ln in text.splitlines() if not ln.startswith("DTSTAMP")]
+    return "\n".join(lines)
+
+
+def get_calendar(cfg: Config):
+    """Findet den vom Nutzer angelegten Kalender per Namen.
+
+    Der Bot legt den Kalender bewusst NICHT selbst an -- der Nutzer muss ihn
+    einmal in der Kalender-App erstellen. Das ist eine kleine Huerde, aber
+    eine wichtige Sicherung: der Bot schreibt garantiert nur in einen
+    Kalender, den der Nutzer bewusst dafuer vorgesehen hat, nie versehentlich
+    in "Privat" oder "Familie".
+    """
+    import caldav
+
+    client = caldav.DAVClient(
+        url="https://caldav.icloud.com/",
+        username=cfg.icloud_user,
+        password=cfg.icloud_app_password,
+        timeout=30,   # sonst haengt ein zaeher iCloud-Request den Lauf ohne Ende
+    )
+    try:
+        principal = client.principal()
+        for calendar in principal.calendars():
+            if calendar.name == cfg.icloud_calendar_name:
+                return calendar
+    except Exception as exc:
+        raise CalendarError(f"iCloud-Verbindung fehlgeschlagen: {exc}") from exc
+
+    raise CalendarError(
+        f"Kalender '{cfg.icloud_calendar_name}' nicht gefunden. "
+        "Einmalig in der Kalender-App anlegen (unter dem iCloud-Account)."
+    )
+
+
+def sync_calendar(cfg: Config, lessons: Sequence[Lesson]) -> str:
+    """Gleicht den iCloud-Kalender mit dem aktuellen Fenster ab.
+
+    Jeder Termin wird einzeln abgesichert (try/except je Termin, nicht nur
+    einmal ums Ganze): Ein einzelner kaputter oder fremd erzeugter Termin im
+    selben Kalender soll den Abgleich der anderen 40+ Termine nicht
+    verhindern -- sonst wuerde ein einziger Ausreisser den Kalender-Abgleich
+    dauerhaft und stillschweigend lahmlegen, ohne dass es auffaellt.
+    """
+    calendar = get_calendar(cfg)
+    try:
+        events = calendar.events()
+    except Exception as exc:
+        raise CalendarError(f"Kalender-Abfrage fehlgeschlagen: {exc}") from exc
+
+    existing = {}
+    unlesbar = 0
+    for ev in events:
+        try:
+            component = ev.icalendar_component
+        except Exception as exc:
+            log.warning("Kalender-Termin nicht lesbar, wird uebersprungen: %s", exc)
+            unlesbar += 1
+            continue
+        if component is None:
+            continue
+        uid = str(component.get("uid", ""))
+        if uid:
+            existing[uid] = ev
+
+    to_upsert, to_delete = plan_calendar_sync(lessons, existing.keys())
+
+    created = updated = skipped = deleted = failed = 0
+    for lesson in to_upsert:
+        uid = lesson_uid(lesson)
+        ics = build_ics_event(lesson, cfg.timezone)
+        try:
+            if uid in existing:
+                if _event_fingerprint(ics) == _event_fingerprint(existing[uid].data):
+                    skipped += 1
+                    continue
+                existing[uid].data = ics
+                existing[uid].save()
+                updated += 1
+            else:
+                calendar.save_event(ics)
+                created += 1
+        except Exception as exc:
+            log.warning("Termin '%s' konnte nicht geschrieben werden: %s", uid, exc)
+            failed += 1
+
+    for uid in to_delete:
+        try:
+            existing[uid].delete()
+            deleted += 1
+        except Exception as exc:
+            log.warning("Termin '%s' konnte nicht geloescht werden: %s", uid, exc)
+            failed += 1
+
+    msg = f"{created} neu, {updated} aktualisiert, {skipped} unveraendert, {deleted} geloescht"
+    if failed or unlesbar:
+        msg += f" ({failed} Fehler, {unlesbar} unlesbar)"
+    return msg
+
+
+def sync_calendar_safe(cfg: Config, lessons: Sequence[Lesson]) -> None:
+    """Kalender-Abgleich darf den Lauf nie zum Scheitern bringen.
+
+    Telegram ist die Hauptaufgabe, der Kalender eine Zusatzfunktion. Ein
+    iCloud-Ausfall soll weder die Stundenplan-Meldung verhindern noch den
+    Job rot werden lassen und Fehler-Mails ausloesen.
+    """
+    if not cfg.icloud_enabled:
+        return
+    try:
+        result = sync_calendar(cfg, lessons)
+        log.info("Kalender abgeglichen: %s", result)
+    except Exception as exc:
+        log.error("Kalender-Abgleich fehlgeschlagen: %s", exc)
+
+
+# ===========================================================================
 #  Ablauf
 # ===========================================================================
 
@@ -1394,10 +1782,16 @@ def check_once(cfg: Config, dry_run: bool = False,
     today = now.date()
     win = window_of(cfg.lookahead_days, today)
 
-    # -- abrufen
+    # -- abrufen. Das Stundenraster kommt aus derselben Sitzung wie der
+    #    Stundenplan -- eine zweite Anmeldung nur fuers Raster waere teurer
+    #    als die eine zusaetzliche Abfrage in der ohnehin offenen Sitzung,
+    #    und das bei JEDEM Lauf statt nur den seltenen mit Aenderungen.
+    #    Untis.timegrid() faengt eigene Fehler bereits ab (liefert {}),
+    #    ein kaputtes Raster darf den Abruf der Stunden nie verhindern.
     try:
         with Untis(cfg) as untis:
             lessons = untis.timetable(*win)
+            periods = untis.timegrid()
     except NothingToDo as exc:
         return Result(IDLE, message=str(exc))
     except AuthError as exc:
@@ -1413,6 +1807,7 @@ def check_once(cfg: Config, dry_run: bool = False,
     # gespeicherten Stunden als verschwunden.
     if previous.exists and compare_win is None:
         if not dry_run:
+            sync_calendar_safe(cfg, lessons)
             save_state(lessons, win, state_path)
             commit_state(state_path)
         return Result(OK, message="Fenster komplett verschoben -- neu grundiert")
@@ -1452,6 +1847,11 @@ def check_once(cfg: Config, dry_run: bool = False,
                     seen, exc)
         bulk_note = "Der Stundenplan hat sich großflächig geändert."
 
+    # -- Kalender abgleichen. Volle Rekonziliation mit dem frischen Fenster,
+    #    unabhaengig vom Diff/Telegram-Pfad darunter -- siehe Modul-Kommentar.
+    if not dry_run:
+        sync_calendar_safe(cfg, lessons)
+
     # -- Erstlauf: nur merken, nicht fluten
     if not previous.exists:
         if not dry_run:
@@ -1468,7 +1868,7 @@ def check_once(cfg: Config, dry_run: bool = False,
             commit_state(state_path)
         return Result(OK, message=f"Keine Aenderungen ({len(lessons)} Stunden)")
 
-    text = render(changes, today, bulk_note=bulk_note)
+    text = render(changes, today, bulk_note=bulk_note, periods=periods)
     if dry_run:
         return Result(OK, changes=len(changes), message=text)
 
@@ -1599,6 +1999,18 @@ def selftest(cfg: Config) -> int:
     except Exception as exc:
         print(f"  [NEIN] {str(exc).splitlines()[0]}")
         ok = False
+
+    if cfg.icloud_enabled:
+        print(f"iCloud-Kalender  {cfg.icloud_user} -> '{cfg.icloud_calendar_name}'")
+        try:
+            calendar = get_calendar(cfg)
+            count = len(calendar.events())
+            print(f"  [ja  ] Kalender gefunden, {count} Termine darin")
+        except Exception as exc:
+            print(f"  [NEIN] {str(exc).splitlines()[0]}")
+            ok = False
+    else:
+        print("iCloud-Kalender  nicht eingerichtet (optional)")
 
     print("=" * 58)
     print("Alles in Ordnung." if ok else "Mindestens ein Zugang ist kaputt.")

@@ -2,5 +2,14 @@
 requests>=2.32,<3
 webuntis>=0.1.24
 
+# Nur fuer den optionalen iCloud-Kalender-Abgleich. Stehen hier trotzdem
+# fest drin statt als "extra": Der GitHub-Runner installiert ohnehin immer
+# alles, und ein fehlendes Paket wuerde erst zur Laufzeit auffallen -- in
+# einem Lauf, in dem die Telegram-Meldung schon unterwegs ist.
+# Die Importe passieren dennoch erst in den Kalender-Funktionen selbst,
+# damit bot.py ohne diese Pakete lauffaehig und testbar bleibt.
+caldav>=1.3
+icalendar>=6.0
+
 # Nur fuer die Tests
 pytest>=8.0
