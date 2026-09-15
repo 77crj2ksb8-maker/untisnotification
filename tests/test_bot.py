@@ -1,8 +1,8 @@
 """Tests fuer untisbot.
 
-Schwerpunkt liegt bewusst auf den reinen Funktionen: Modell, Vergleich,
-Nachrichten-Rendering und die Kalender-Planung. Die laufen ohne Netz, ohne
-Zugangsdaten und ohne Wartezeit -- deshalb koennen es viele sein.
+Schwerpunkt liegt bewusst auf den reinen Funktionen: Modell, Vergleich
+und Nachrichten-Rendering. Die laufen ohne Netz, ohne Zugangsdaten und
+ohne Wartezeit -- deshalb koennen es viele sein.
 
 Die duenne I/O-Schicht wird mit Attrappen geprueft, nicht gegen echte
 Server. Getestet wird dort nur, was schiefgehen KANN: Wiederholungen,
@@ -10,10 +10,12 @@ Rueckfallebenen, und vor allem die Zusicherungen, auf die man sich
 verlassen koennen muss --
 
     * es wird nie derselbe Stand zweimal an Telegram gemeldet
-    * es wird nie ein fremder Kalendertermin angefasst
-    * ein Fehler in Kalender oder git kippt nie den Telegram-Pfad
+    * ein git-Fehler kippt nie einen Lauf, in dem schon gesendet wurde
+    * bei einem Datenproblem kommt keine Massenmeldung
+    * ein unveraenderter Zustand wird nicht neu geschrieben (Commit-Flut)
+    * eine Testnachricht veraendert nichts am gespeicherten Zustand
 
-Diese drei sind ausdruecklich markiert (SICHERHEITSNETZ) und eignen sich
+Diese fuenf sind ausdruecklich markiert (SICHERHEITSNETZ) und eignen sich
 fuer einen Mutationstest: Guard-Klausel entfernen -> der jeweils genannte
 Test muss rot werden.
 """
