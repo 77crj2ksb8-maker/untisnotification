@@ -27,8 +27,16 @@ on:
     - cron: "0,30 4-17 * * 1-5"
   workflow_dispatch:
     inputs:
+      modus:
+        description: "watch = normal ueberwachen, testmessage = einmalige Beispielnachricht"
+        required: false
+        default: "watch"
+        type: choice
+        options:
+          - watch
+          - testmessage
       minuten:
-        description: "Wie lange dieser Lauf ueberwachen soll"
+        description: "Wie lange dieser Lauf ueberwachen soll (nur bei modus=watch)"
         required: false
         default: "10"
 
@@ -36,7 +44,10 @@ permissions:
   contents: write        # noetig, um state.json zurueckzuschreiben
 
 concurrency:
-  group: untisbot
+  # Die Testnachricht bekommt eine eigene Gruppe. Sonst muesste sie hinter
+  # einem laufenden watch warten -- und das dauert bis zu 55 Minuten.
+  # Geplante Laeufe setzen keine Inputs, landen also in "untisbot-watch".
+  group: untisbot-${{ github.event.inputs.modus || 'watch' }}
   # Niemals abbrechen: Ein laufender Check darf nicht mitten im Versand
   # gekappt werden.
   cancel-in-progress: false
@@ -76,9 +87,14 @@ jobs:
           LOOKAHEAD_DAYS: "7"
           TIMEZONE: "Europe/Berlin"
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          python bot.py watch --minutes "${{ github.event.inputs.minuten || '55' }}"
+          if [ "${{ github.event.inputs.modus }}" = "testmessage" ]; then
+            # Kein git config noetig: testmessage schreibt keinen Zustand.
+            python bot.py testmessage
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            python bot.py watch --minutes "${{ github.event.inputs.minuten || '55' }}"
+          fi
 
 # Hinweis: GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein
 # Commit im Repo passiert -- etwa ueber die Sommerferien. Danach einmal im

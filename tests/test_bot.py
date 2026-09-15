@@ -3181,3 +3181,129 @@ def test_setup_logging_unbekannte_stufe_kippt_nicht():
     nicht verhindern."""
     bot.setup_logging("gibtsnicht")
     bot.setup_logging("INFO")   # aufraeumen
+
+
+# ===========================================================================
+#  Testnachricht
+# ===========================================================================
+
+def test_demo_changes_trifft_viele_arten():
+    arten = {c.kind for c in bot.demo_changes(HEUTE)}
+    assert {"cancelled", "teacher", "room", "marked"} <= arten
+
+
+def test_demo_changes_liegt_im_demo_raster():
+    """Sonst stuenden in der Testnachricht Uhrzeiten statt Stundennummern
+    und sie zeigte nicht das, was sie zeigen soll."""
+    for change in bot.demo_changes(HEUTE):
+        assert bot.period_name(change.lesson, bot.DEMO_RASTER) is not None
+
+
+def test_demo_raster_deckt_jeden_wochentag():
+    """Die Testnachricht muss an jedem Tag funktionieren, an dem sie
+    ausgeloest wird -- auch sonntags."""
+    assert set(bot.DEMO_RASTER) == set(range(7))
+
+
+def test_demo_changes_zeigt_buendelung_und_doppelstunde():
+    eintraege = bot.build_entries(bot.demo_changes(HEUTE), bot.DEMO_RASTER)
+    labels = [(e.label, e.labels) for e in eintraege]
+    assert ("1./2. Stunde", "entfällt") in labels
+    assert ("3./4. Stunde", "Vertretung, Raumwechsel") in labels
+    assert ("6. Stunde", "Raumwechsel") in labels
+
+
+def test_testmessage_sendet_genau_einmal(cfg, monkeypatch):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    assert bot.testmessage(cfg) == 0
+    assert len(gesendet) == 1
+
+
+def test_testmessage_ist_als_test_erkennbar(cfg, monkeypatch):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    bot.testmessage(cfg)
+    assert "TESTNACHRICHT" in gesendet[0]
+
+
+def test_testmessage_ruehrt_zustand_und_kalender_nicht_an(cfg, monkeypatch):
+    """SICHERHEITSNETZ: Eine Testnachricht darf den Betrieb nicht
+    veraendern -- sonst faelscht sie den Vergleich des naechsten Laufs
+    oder schreibt Termine in den Kalender."""
+    def verboten(*_a, **_k):
+        raise AssertionError("testmessage darf das nicht anfassen")
+
+    monkeypatch.setattr(bot, "save_state", verboten)
+    monkeypatch.setattr(bot, "load_state", verboten)
+    monkeypatch.setattr(bot, "commit_state", verboten)
+    monkeypatch.setattr(bot, "sync_calendar_safe", verboten)
+    monkeypatch.setattr(bot, "send", lambda *_a, **_k: 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    assert bot.testmessage(cfg) == 0
+
+
+def test_testmessage_meldet_verfuegbares_raster(cfg, monkeypatch):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    bot.testmessage(cfg)
+    assert "Stundenraster: verfügbar" in gesendet[0]
+
+
+def test_testmessage_meldet_fehlendes_raster(cfg, monkeypatch):
+    """Die Frage, die man dem Bot im Betrieb sonst nicht ansieht."""
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(timegrid_fehler=True))
+    bot.testmessage(cfg)
+    assert "NICHT verfügbar" in gesendet[0]
+
+
+def test_testmessage_ueberlebt_kaputtes_webuntis(cfg, monkeypatch):
+    """Das Format soll auch dann vorfuehrbar sein, wenn WebUntis klemmt."""
+    gesendet = []
+
+    class KaputtesUntis(FakeUntis):
+        def __enter__(self):
+            raise bot.UntisError("Server weg")
+
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", KaputtesUntis())
+    assert bot.testmessage(cfg) == 0
+    assert "TESTNACHRICHT" in gesendet[0] and "NICHT verfügbar" in gesendet[0]
+
+
+def test_testmessage_meldet_icloud_status(icloud_cfg, monkeypatch):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    bot.testmessage(icloud_cfg)
+    assert "iCloud-Kalender: eingerichtet" in gesendet[0]
+
+
+def test_testmessage_meldet_fehlendes_icloud(cfg, monkeypatch):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    bot.testmessage(cfg)
+    assert "nicht eingerichtet" in gesendet[0]
+
+
+def test_testmessage_gibt_1_bei_versandfehler(cfg, monkeypatch, capsys):
+    def abgelehnt(*_a, **_k):
+        raise TelegramConfigError("Token falsch")
+
+    monkeypatch.setattr(bot, "send", abgelehnt)
+    monkeypatch.setattr(bot, "Untis", FakeUntis(periods=RASTER))
+    assert bot.testmessage(cfg) == 1
+    assert "nicht zugestellt" in capsys.readouterr().err
+
+
+def test_main_testmessage(cfg, monkeypatch):
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(bot, "testmessage", lambda c: 0)
+    assert bot.main(["testmessage"]) == 0

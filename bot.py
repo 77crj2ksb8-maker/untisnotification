@@ -19,6 +19,7 @@ Aufrufe:
     python bot.py check              einmal pruefen
     python bot.py watch --minutes 55 55 Minuten lang alle 5 Minuten pruefen
     python bot.py selftest           Zugangsdaten einzeln durchtesten
+    python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py show               Stundenplan anzeigen (Diagnose)
 """
 
@@ -2114,6 +2115,109 @@ def selftest(cfg: Config) -> int:
     return 0 if ok else 1
 
 
+#: Beispielraster fuer die Testnachricht -- fuer JEDEN Wochentag gleich,
+#: damit die Nachricht unabhaengig davon funktioniert, auf welchen Tag sie
+#: faellt. Es ist bewusst nicht das echte Raster der Schule: Die
+#: Testnachricht soll zeigen, wie das Format AUSSIEHT, und das muss auch
+#: dann gehen, wenn WebUntis gerade nicht erreichbar ist.
+DEMO_RASTER: Periods = {
+    tag: [("07:40", "08:25", "1"), ("08:30", "09:15", "2"),
+          ("09:35", "10:20", "3"), ("10:25", "11:10", "4"),
+          ("11:30", "12:15", "5"), ("12:20", "13:05", "6")]
+    for tag in range(7)
+}
+
+
+def demo_changes(today: dt.date) -> list[Change]:
+    """Ein Beispielszenario, das moeglichst viele Aenderungsarten trifft.
+
+    Rein, damit der Inhalt der Testnachricht selbst testbar ist -- ohne
+    diese Trennung koennte man nur pruefen, DASS gesendet wurde, nicht WAS.
+    """
+    morgen = today + dt.timedelta(days=1)
+
+    def stunde(uid, tag, start, ende, fach, **rest):
+        return Lesson(uid=uid, date=f"{tag:%Y-%m-%d}", start=start, end=ende,
+                      subjects=(fach,) if fach else (), **rest)
+
+    return [
+        # Doppelstunde faellt aus -- wird zu einem Eintrag zusammengefasst
+        Change("cancelled", stunde(1, today, "07:40", "08:25", "M"), "Lehrkraft erkrankt"),
+        Change("cancelled", stunde(2, today, "08:30", "09:15", "M"), "Lehrkraft erkrankt"),
+        # Vertretung MIT Raumwechsel ueber eine Doppelstunde -- ein Eintrag,
+        # zwei Arten. Genau der Fall, fuer den die Buendelung gebaut wurde.
+        Change("teacher", stunde(3, today, "09:35", "10:20", "D"), "Abel → Zeh"),
+        Change("room", stunde(3, today, "09:35", "10:20", "D"), "R201 → R105"),
+        Change("teacher", stunde(4, today, "10:25", "11:10", "D"), "Abel → Zeh"),
+        Change("room", stunde(4, today, "10:25", "11:10", "D"), "R201 → R105"),
+        # Einzelstunde -- zeigt die Stundennummer statt der Uhrzeit
+        Change("room", stunde(5, today, "12:20", "13:05", "Ph"), "R301 → Labor"),
+        # Der ks-hausach-Normalfall: keine Lehrerdaten, nur die Markierung
+        Change("marked", stunde(6, morgen, "08:30", "09:15", "E",
+                                rooms=("R112",), status=IRREGULAR), "Raum R112"),
+    ]
+
+
+def diagnose_lines(cfg: Config) -> list[str]:
+    """Kurzer Befund fuer den Fuss der Testnachricht.
+
+    Der eigentliche Zweck der Testnachricht ist das Format -- aber solange
+    sie ohnehin laeuft, beantwortet sie die zwei Fragen gleich mit, die man
+    dem Bot im Betrieb sonst NICHT ansieht: ob die Schule das Stundenraster
+    herausgibt (ohne das bleibt es bei Uhrzeiten) und ob der Kalender
+    ueberhaupt eingerichtet ist. Beides faellt sonst lautlos aus.
+    """
+    zeilen = ["", "<i>— Befund —</i>"]
+
+    try:
+        with Untis(cfg) as untis:
+            periods = untis.timegrid()
+    except Exception as exc:
+        periods = {}
+        log.warning("Raster-Abruf fuer die Testnachricht fehlgeschlagen: %s", exc)
+
+    if periods:
+        einheiten = sum(len(u) for u in periods.values())
+        zeilen.append(f"<i>Stundenraster: verfügbar ({len(periods)} Tage, "
+                      f"{einheiten} Stunden) — echte Meldungen sehen aus wie oben.</i>")
+    else:
+        zeilen.append("<i>Stundenraster: NICHT verfügbar — echte Meldungen zeigen "
+                      "Uhrzeiten statt Stundennummern und fassen keine "
+                      "Doppelstunden zusammen.</i>")
+
+    if cfg.icloud_enabled:
+        zeilen.append(f"<i>iCloud-Kalender: eingerichtet "
+                      f"('{esc(cfg.icloud_calendar_name)}').</i>")
+    else:
+        zeilen.append("<i>iCloud-Kalender: nicht eingerichtet — es wird nichts "
+                      "synchronisiert.</i>")
+    return zeilen
+
+
+def testmessage(cfg: Config) -> int:
+    """Schickt eine Beispielnachricht im aktuellen Format an alle Chats.
+
+    Bewusst folgenlos fuer den Betrieb: Es wird kein Zustand gelesen oder
+    geschrieben, kein Kalender angefasst und nichts committet. Ein
+    Produktionslauf ("check") taugt dafuer nicht -- der sendet nur, wenn es
+    zufaellig echte Aenderungen gibt, und veraendert dabei state.json.
+    """
+    today = now_local(cfg.timezone).date()
+    text = render(demo_changes(today), today,
+                  header="TESTNACHRICHT — so sehen Änderungen künftig aus",
+                  periods=DEMO_RASTER)
+    text = "\n".join([text] + diagnose_lines(cfg))
+
+    try:
+        erreicht = send(cfg, text)
+    except TelegramError as exc:
+        print(f"FEHLER: Testnachricht nicht zugestellt:\n{exc}", file=sys.stderr)
+        return 1
+
+    print(f"Testnachricht an {erreicht} von {len(cfg.telegram_chats)} Chat(s) gesendet.")
+    return 0
+
+
 def show(cfg: Config, days: int | None) -> int:
     """Zeigt den Stundenplan im Klartext."""
     today = now_local(cfg.timezone).date()
@@ -2183,6 +2287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                          help="Sekunden zwischen zwei Pruefungen")
 
     sub.add_parser("selftest", help="Zugangsdaten einzeln pruefen")
+    sub.add_parser("testmessage", help="Beispielnachricht im aktuellen Format senden")
 
     p_show = sub.add_parser("show", help="Stundenplan anzeigen")
     p_show.add_argument("--days", type=int, default=None)
@@ -2204,6 +2309,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "selftest":
         return selftest(cfg)
+    if command == "testmessage":
+        return testmessage(cfg)
     if command == "show":
         return show(cfg, args.days)
     if command == "watch":
