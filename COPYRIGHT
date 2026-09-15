@@ -1,0 +1,50 @@
+Copyright (c) 2026 77crj2ksb8-maker. Alle Rechte vorbehalten.
+All rights reserved.
+
+  Hinweis: Trage hier deinen buergerlichen Namen oder Firmennamen ein, wenn
+  du dich rechtlich darauf berufen willst. Ein Pseudonym genuegt fuer eine
+  Urheberrechtsbehauptung meist, macht die Durchsetzung aber schwerer.
+
+
+EINSEHBAR, NICHT FREI
+
+Dieses Repository ist oeffentlich lesbar. Das ist eine technische
+Notwendigkeit, keine Freigabe: GitHub Actions ist nur fuer oeffentliche
+Repositories unbegrenzt kostenlos, und der Bot braucht diese Laufzeit.
+
+Oeffentlich sichtbar heisst NICHT quelloffen. Ohne ausdrueckliche
+schriftliche Erlaubnis des Rechteinhabers ist nicht gestattet:
+
+  * den Quelltext zu kopieren, zu veraendern oder weiterzugeben
+  * ihn ganz oder in Teilen in eigene Projekte zu uebernehmen
+  * eine eigene Instanz des Bots zu betreiben
+  * ihn kommerziell zu verwerten
+
+Erlaubt ist das Lesen des Quelltextes.
+
+Wer den Bot nutzen moechte, fragt den Rechteinhaber. Eine Erlaubnis kann
+formlos erteilt werden und gilt dann nur fuer die Person, der sie erteilt
+wurde.
+
+
+FREMDE BESTANDTEILE
+
+Die verwendeten Bibliotheken stehen unter ihren eigenen Lizenzen und sind
+von dieser Einschraenkung nicht beruehrt:
+
+  requests   Apache License 2.0
+  webuntis   BSD 3-Clause (inoffizielle Bibliothek, nicht von Untis GmbH)
+  pytest     MIT
+  ruff       MIT
+
+"WebUntis" und "Untis" sind Marken der Untis GmbH. Dieses Projekt steht in
+keiner Verbindung zu ihr und wird von ihr weder unterstuetzt noch geprueft.
+
+
+KEINE GEWAEHR
+
+Die Software wird bereitgestellt "wie sie ist", ohne Gewaehrleistung jeder
+Art. Der Rechteinhaber haftet nicht fuer Schaeden, die aus ihrer Nutzung
+entstehen -- insbesondere nicht dafuer, dass eine Stundenplanaenderung
+nicht, verspaetet oder falsch gemeldet wird. Verbindlich ist immer der
+Stundenplan in WebUntis selbst.

@@ -1483,6 +1483,61 @@ def antworten(monkeypatch, *payloads):
     return aufrufe
 
 
+def test_scrub_entfernt_den_token():
+    text = "Max retries exceeded with url: /bot123:AAH-geheim/sendMessage"
+    assert "AAH-geheim" not in bot.scrub(text, "123:AAH-geheim")
+
+
+def test_scrub_setzt_platzhalter():
+    assert bot.scrub("a 123:AAH b", "123:AAH") == "a <TOKEN> b"
+
+
+def test_scrub_ohne_token_unveraendert():
+    assert bot.scrub("nichts zu holen", "") == "nichts zu holen"
+
+
+def test_scrub_laesst_uebrigen_text_stehen():
+    text = "Netzwerkfehler bei sendMessage: Verbindung abgelehnt"
+    assert bot.scrub(text, "123:AAH") == text
+
+
+def test_telegram_call_leakt_den_token_nicht(monkeypatch):
+    """SICHERHEITSNETZ: requests nennt in Netzwerkfehlern die volle URL --
+    samt Token. Die Fehlermeldung wandert bis in die Job-Ausgabe.
+    Mutationstest: das scrub() in telegram_call entfernen -> dieser Test
+    muss rot werden."""
+    geheim = "123456789:AAH-streng-geheim-xyz"
+
+    def fake_post(url, json=None, timeout=None):
+        raise bot.requests.exceptions.ConnectionError(
+            f"HTTPSConnectionPool(host='api.telegram.org', port=443): "
+            f"Max retries exceeded with url: /bot{geheim}/sendMessage")
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    with pytest.raises(TelegramError) as fehler:
+        bot.telegram_call(geheim, "sendMessage", {})
+    assert geheim not in str(fehler.value)
+    assert "<TOKEN>" in str(fehler.value)
+
+
+def test_send_leakt_den_token_nicht(monkeypatch, cfg):
+    """Derselbe Schutz auf dem Weg, den eine echte Meldung nimmt."""
+    geheim = cfg.telegram_token
+
+    def fake_post(url, json=None, timeout=None):
+        raise bot.requests.exceptions.ConnectionError(
+            f"Max retries exceeded with url: /bot{geheim}/sendMessage")
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    with pytest.raises(TelegramError) as fehler:
+        bot.send(cfg, "Hallo")
+    assert geheim not in str(fehler.value)
+
+
+def test_version_ist_gesetzt():
+    assert bot.VERSION in bot.USER_AGENT
+
+
 def test_telegram_call_erfolg(monkeypatch):
     antworten(monkeypatch, {"ok": True, "result": {"username": "untisbot"}})
     assert bot.telegram_call("t", "getMe", {}) == {"username": "untisbot"}

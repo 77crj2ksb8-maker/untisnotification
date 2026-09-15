@@ -1,5 +1,7 @@
 # untisbot
 
+[![Tests](https://github.com/77crj2ksb8-maker/untisnotification/actions/workflows/tests.yml/badge.svg)](https://github.com/77crj2ksb8-maker/untisnotification/actions/workflows/tests.yml)
+
 Meldet Änderungen am WebUntis-Stundenplan per Telegram — Ausfall, Vertretung,
 Raumwechsel, verschobene Stunden. Läuft kostenlos auf GitHub Actions, braucht
 keinen eigenen Server.
@@ -45,7 +47,7 @@ Einrichtung im eigenen Repo: **[SETUP.md](SETUP.md)**.
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py show --days 3` | Stundenplan im Klartext anzeigen |
 
-`--log DEBUG` gibt es zu jedem Befehl.
+`--log DEBUG` und `--version` gibt es zu jedem Befehl.
 
 ## Einstellungen
 
@@ -109,13 +111,15 @@ gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
 ```
 bot.py                              der ganze Bot
-tests/test_bot.py                   359 Tests, ohne Netz lauffähig
+tests/test_bot.py                   366 Tests, ohne Netz lauffähig
 pyproject.toml                      Einstellungen für pytest und ruff
 requirements.txt                    Abhängigkeiten
 .env.example                        Vorlage für die lokale Entwicklung
 .github/workflows/check-timetable.yml   der Bot-Lauf
 .github/workflows/tests.yml         Linter und Tests bei jedem Push
 SETUP.md                            Einrichtung im eigenen Repo
+CHANGELOG.md                        was sich wann geändert hat
+COPYRIGHT                           Nutzungsrechte
 state.json                          das Gedächtnis des Bots
 ```
 
@@ -144,7 +148,7 @@ Logging statt Weiterreichen.
 ```bash
 pip install -r requirements.txt
 
-python -m pytest             # 359 Tests, keine Netzverbindung nötig
+python -m pytest             # 366 Tests, keine Netzverbindung nötig
 ruff check .                 # Linter
 ```
 
@@ -185,3 +189,17 @@ wiederholt was ohnehin dasteht, kann weg.
 * GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein Commit im Repo
   passiert. Da der Bot selbst committet, erledigt sich das im Schuljahr von
   allein — nach langen Ferien einmal „Enable workflow" klicken.
+
+## Nutzungsrechte
+
+Einsehbar, aber nicht frei. Das Repository ist öffentlich, weil GitHub Actions
+nur für öffentliche Repositories unbegrenzt kostenlos ist — das ist eine
+technische Notwendigkeit, keine Freigabe. Kopieren, Verändern, Weitergeben und
+der Betrieb einer eigenen Instanz brauchen die Erlaubnis des Rechteinhabers.
+Einzelheiten in [COPYRIGHT](COPYRIGHT).
+
+„WebUntis" und „Untis" sind Marken der Untis GmbH. Dieses Projekt steht in
+keiner Verbindung zu ihr. Die verwendete `webuntis`-Bibliothek ist inoffiziell.
+
+Verbindlich ist immer der Stundenplan in WebUntis selbst — der Bot ist eine
+Bequemlichkeit, keine Garantie.

@@ -54,8 +54,10 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
+VERSION = "2.1.0"
+
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
-USER_AGENT = "untisbot/2.0 (privates Stundenplan-Tool)"
+USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
 
 #: Format-Version des gespeicherten Zustands. Passt sie nicht, wird der
 #: alte Zustand verworfen statt falsch gedeutet.
@@ -1276,6 +1278,22 @@ HINTS = {
 }
 
 
+def scrub(text: str, token: str) -> str:
+    """Entfernt den Bot-Token aus einem Fehlertext.
+
+    requests nennt in Netzwerkfehlern die vollstaendige URL, und die
+    enthaelt den Token:
+
+        Max retries exceeded with url: /bot123456:AAH-geheim/sendMessage
+
+    Ungefiltert stuende das Geheimnis damit in der Fehlermeldung -- und die
+    wird bis in die Job-Ausgabe durchgereicht. GitHub maskiert registrierte
+    Secrets in seinen Logs, aber lokal maskiert niemand, und eine
+    weitergereichte Fehlermeldung ist schnell in einem Chat gelandet.
+    """
+    return text.replace(token, "<TOKEN>") if token else text
+
+
 def telegram_call(token: str, method: str, payload: dict) -> dict:
     """Ruft die Telegram-API auf, mit Wiederholung bei Stoerungen."""
     url = f"{API}/bot{token}/{method}"
@@ -1286,7 +1304,8 @@ def telegram_call(token: str, method: str, payload: dict) -> dict:
             response = requests.post(url, json=payload, timeout=TIMEOUT)
             data = response.json()
         except requests.RequestException as exc:
-            last = TelegramError(f"Netzwerkfehler bei {method}: {exc}")
+            last = TelegramError(
+                f"Netzwerkfehler bei {method}: {scrub(str(exc), token)}")
         except ValueError:
             last = TelegramError(f"Unlesbare Antwort bei {method} "
                                  f"(HTTP {response.status_code})")
@@ -2032,6 +2051,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="bot.py",
         description="Meldet WebUntis-Stundenplanaenderungen per Telegram.",
     )
+    parser.add_argument("--version", action="version",
+                        version=f"untisbot {VERSION}")
     parser.add_argument("--log", default=None,
                         help="DEBUG, INFO, WARNING, ERROR")
     parser.set_defaults(dry_run=False)   # gilt auch ohne Unterbefehl

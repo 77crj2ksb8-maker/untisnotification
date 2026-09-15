@@ -3,6 +3,10 @@
 Für alle, die den Bot im **eigenen** Repo betreiben wollen. Rechne mit einer
 Viertelstunde.
 
+> **Vorher:** Der Betrieb einer eigenen Instanz braucht die Erlaubnis des
+> Rechteinhabers — siehe [COPYRIGHT](COPYRIGHT). Frag einmal kurz nach, das
+> ist formlos möglich.
+
 Vorweg zwei Dinge, die Zeit sparen:
 
 * **Die Dateien sind für alle identisch.** Im Code steht nichts Persönliches,
