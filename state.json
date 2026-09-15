@@ -1,6 +1,6 @@
 {
  "schema": 2,
- "saved_at": "2026-09-15T09:17:56+00:00",
+ "saved_at": "2026-09-15T09:47:55+00:00",
  "window": {
   "from": "2026-09-15",
   "to": "2026-09-22"
@@ -291,7 +291,7 @@
    "rooms": [
     "H1.04"
    ],
-   "status": "cancelled",
+   "status": "regular",
    "note": "",
    "group": "D(G2)_3WGI13_13WGW13_2_MG",
    "lesson_no": 109200
@@ -308,7 +308,7 @@
    "rooms": [
     "H1.04"
    ],
-   "status": "cancelled",
+   "status": "regular",
    "note": "",
    "group": "D(G2)_3WGI13_13WGW13_2_MG",
    "lesson_no": 109200
