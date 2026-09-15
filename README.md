@@ -105,6 +105,20 @@ Wer das nicht will, muss den Zustand woanders ablegen (Actions-Cache statt
 Commit) — dann kann er verlorengehen, was ungefährlich ist: Ein Lauf ohne
 gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
+## Was wo liegt
+
+```
+bot.py                              der ganze Bot
+tests/test_bot.py                   359 Tests, ohne Netz lauffähig
+pyproject.toml                      Einstellungen für pytest und ruff
+requirements.txt                    Abhängigkeiten
+.env.example                        Vorlage für die lokale Entwicklung
+.github/workflows/check-timetable.yml   der Bot-Lauf
+.github/workflows/tests.yml         Linter und Tests bei jedem Push
+SETUP.md                            Einrichtung im eigenen Repo
+state.json                          das Gedächtnis des Bots
+```
+
 ## Aufbau
 
 Alles in einer Datei. Das ist Absicht: Das Projekt ist klein genug, und beim
@@ -127,9 +141,24 @@ Logging statt Weiterreichen.
 
 ## Entwicklung
 
-```
+```bash
 pip install -r requirements.txt
-python -m pytest -q          # 359 Tests, keine Netzverbindung nötig
+
+python -m pytest             # 359 Tests, keine Netzverbindung nötig
+ruff check .                 # Linter
+```
+
+Beides läuft bei jedem Push auch in GitHub Actions
+(`.github/workflows/tests.yml`). Die Einstellungen stehen in
+`pyproject.toml` — dort ist auch begründet, welche Linter-Regeln bewusst
+abgewählt sind und warum.
+
+Für einen lokalen Lauf gegen echte Daten `.env.example` nach `.env`
+kopieren und ausfüllen. Dann:
+
+```bash
+python bot.py selftest        # prüft jeden Zugang einzeln
+python bot.py check --dry-run # prüft, ohne zu senden oder zu speichern
 ```
 
 Bei sicherheitskritischer Logik gilt zusätzlich ein Mutationstest:
@@ -150,9 +179,6 @@ wiederholt was ohnehin dasteht, kann weg.
 
 ## Bekannte Eigenheiten
 
-* `check-timetable.yml` liegt doppelt im Repo — in der Wurzel und unter
-  `.github/workflows/`. Aktiv ist nur die zweite; die Kopie in der Wurzel kann
-  gelöscht werden.
 * Manche Felder bleiben strukturell leer. Viele Schulen geben
   Schüler-Accounts keine Lehrerdaten heraus — dann ist eine Vertretung oft nur
   als „als Änderung markiert" sichtbar. Das ist kein Fehler.

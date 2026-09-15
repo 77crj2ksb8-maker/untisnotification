@@ -22,17 +22,14 @@ Test muss rot werden.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import bot  # noqa: E402
-from bot import (  # noqa: E402
+import bot
+from bot import (
     CANCELLED,
     IRREGULAR,
     REGULAR,
@@ -45,7 +42,6 @@ from bot import (  # noqa: E402
     TelegramConfigError,
     TelegramError,
 )
-
 
 # ===========================================================================
 #  Hilfsmittel
@@ -130,7 +126,7 @@ BASIS_ENV = {
 @pytest.fixture
 def env(monkeypatch):
     """Saubere Umgebung: alle bekannten Variablen erst weg, dann die Basis."""
-    for name in list(BASIS_ENV) + ["WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE"]:
+    for name in [*BASIS_ENV, "WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE"]:
         monkeypatch.delenv(name, raising=False)
     for name, value in BASIS_ENV.items():
         monkeypatch.setenv(name, value)
@@ -202,7 +198,7 @@ def test_config_lookahead_wird_begrenzt(env, eingabe, erwartet):
 
 
 def test_config_ist_unveraenderlich(cfg):
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.untis_school = "andere"
 
 
@@ -252,11 +248,12 @@ def test_now_local_nutzt_zeitzone():
 def test_lesson_sortiert_tupel_immer():
     """Die Invariante der Klasse -- ohne sie meldet jeder zweite Abruf
     Aenderungen, die keine sind."""
-    l = Lesson(uid=1, date=MO, start="07:40", end="08:25",
-               subjects=("M", "D"), teachers=("Zeh", "Abel"), rooms=("R2", "R1"))
-    assert l.subjects == ("D", "M")
-    assert l.teachers == ("Abel", "Zeh")
-    assert l.rooms == ("R1", "R2")
+    stunde = Lesson(uid=1, date=MO, start="07:40", end="08:25",
+                    subjects=("M", "D"), teachers=("Zeh", "Abel"),
+                    rooms=("R2", "R1"))
+    assert stunde.subjects == ("D", "M")
+    assert stunde.teachers == ("Abel", "Zeh")
+    assert stunde.rooms == ("R1", "R2")
 
 
 def test_lesson_gleichheit_unabhaengig_von_reihenfolge():
@@ -266,12 +263,12 @@ def test_lesson_gleichheit_unabhaengig_von_reihenfolge():
 
 
 def test_lesson_aus_listen_wird_tupel():
-    l = Lesson(uid=1, date=MO, start="07:40", end="08:25", rooms=["R2", "R1"])
-    assert l.rooms == ("R1", "R2")
+    stunde = Lesson(uid=1, date=MO, start="07:40", end="08:25", rooms=["R2", "R1"])
+    assert stunde.rooms == ("R1", "R2")
 
 
 def test_lesson_ist_unveraenderlich():
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         lesson().date = MI
 
 
@@ -322,8 +319,8 @@ def test_from_json_ignoriert_unbekannte_felder():
 
 def test_from_json_ohne_listen():
     roh = {"uid": 1, "date": MO, "start": "07:40", "end": "08:25"}
-    l = Lesson.from_json(roh)
-    assert (l.subjects, l.teachers, l.rooms) == ((), (), ())
+    stunde = Lesson.from_json(roh)
+    assert (stunde.subjects, stunde.teachers, stunde.rooms) == ((), (), ())
 
 
 def test_from_json_mit_null_listen():
@@ -371,10 +368,12 @@ def test_normalise_baut_lesson():
     period = FakePeriod({"id": 5, "su": [{"id": 1, "name": "M"}],
                          "te": [{"id": 2, "name": "Abel"}],
                          "ro": [{"id": 3, "name": "R1"}]})
-    l = bot.normalise(period, resolve_by_name)
-    assert (l.uid, l.date, l.start, l.end) == (5, MO, "07:40", "08:25")
-    assert (l.subjects, l.teachers, l.rooms) == (("M",), ("Abel",), ("R1",))
-    assert l.status == REGULAR
+    stunde = bot.normalise(period, resolve_by_name)
+    assert (stunde.uid, stunde.date, stunde.start, stunde.end) == \
+           (5, MO, "07:40", "08:25")
+    assert (stunde.subjects, stunde.teachers, stunde.rooms) == \
+           (("M",), ("Abel",), ("R1",))
+    assert stunde.status == REGULAR
 
 
 def test_normalise_uebernimmt_ausfall():
@@ -415,8 +414,8 @@ def test_normalise_leere_lehrerliste_ist_kein_fehler():
 
 def test_normalise_nimmt_lsnumber_und_sg():
     period = FakePeriod({"id": 5, "lsnumber": 4242, "sg": "M-LK"})
-    l = bot.normalise(period, resolve_by_name)
-    assert (l.lesson_no, l.group) == (4242, "M-LK")
+    stunde = bot.normalise(period, resolve_by_name)
+    assert (stunde.lesson_no, stunde.group) == (4242, "M-LK")
 
 
 def test_resolver_ueberspringt_nicht_dicts():
@@ -468,7 +467,7 @@ def test_within_ohne_fenster_gibt_alles():
 def test_within_beschneidet():
     stunden = [lesson(date=MO), lesson(date=DI), lesson(date=MI)]
     treffer = bot.within(stunden, (dt.date(2026, 9, 15), dt.date(2026, 9, 15)))
-    assert [l.date for l in treffer] == [DI]
+    assert [stunde.date for stunde in treffer] == [DI]
 
 
 def test_within_raender_sind_eingeschlossen():
@@ -516,8 +515,10 @@ def test_pair_up_nur_alte():
 def test_pair_up_doppelte_id_verliert_nichts():
     """Doppelte ids waeren ein WebUntis-Fehler -- trotzdem darf keine
     Stunde unter den Tisch fallen."""
-    alt = [lesson(uid=1, subjects=("M",)), lesson(uid=1, subjects=("D",), start="08:30")]
-    neu = [lesson(uid=1, subjects=("M",)), lesson(uid=1, subjects=("D",), start="08:30")]
+    alt = [lesson(uid=1, subjects=("M",)),
+           lesson(uid=1, subjects=("D",), start="08:30")]
+    neu = [lesson(uid=1, subjects=("M",)),
+           lesson(uid=1, subjects=("D",), start="08:30")]
     paare, nur_alt, nur_neu = bot.pair_up(alt, neu)
     assert len(paare) + len(nur_alt) == 2
     assert len(paare) + len(nur_neu) == 2
@@ -1184,7 +1185,7 @@ def test_entry_buendelt_auch_ohne_raster():
 
 def test_entry_ist_unveraenderlich():
     eintrag = bot.build_entries([Change("cancelled", lesson())], RASTER)[0]
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         eintrag.label = "anders"
 
 
@@ -1225,7 +1226,8 @@ def test_render_zeigt_stundennummer_bei_einzelaenderung():
 def test_render_bleibt_bei_uhrzeit_ohne_raster():
     text = bot.render([Change("room", lesson(start="12:20"), "R1 → R2")], HEUTE)
     assert "<b>12:20</b>" in text
-    assert ". Stunde" not in text   # nicht auf "Stunde" pruefen -- steckt in der Ueberschrift
+    # Nicht auf "Stunde" pruefen -- das steckt schon in der Ueberschrift.
+    assert ". Stunde" not in text
 
 
 def test_render_vollstaendiges_szenario_wird_kuerzer():
@@ -1319,7 +1321,8 @@ def test_render_ohne_raster_zwei_zeilen():
 def test_render_periods_none_wie_ohne_raster():
     aenderungen = [Change("cancelled", lesson(uid=1, start="07:40")),
                    Change("cancelled", lesson(uid=2, start="08:30"))]
-    assert bot.render(aenderungen, HEUTE, periods=None) == bot.render(aenderungen, HEUTE)
+    assert bot.render(aenderungen, HEUTE, periods=None) == \
+           bot.render(aenderungen, HEUTE)
 
 
 def test_render_wechselt_ab_schwelle_zur_kurzfassung():
@@ -1336,19 +1339,22 @@ def test_render_knapp_unter_der_schwelle_listet_auf():
 
 
 def test_render_summary_zaehlt_nach_art():
-    aenderungen = ([Change("cancelled", lesson(uid=i, start=f"{i:02d}:00")) for i in range(3)]
-                   + [Change("room", lesson(uid=9, start="23:00"), "a → b")])
+    aenderungen = [*[Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
+                     for i in range(3)],
+                   Change("room", lesson(uid=9, start="23:00"), "a → b")]
     text = bot.render_summary(aenderungen, HEUTE)
     assert "3× entfällt" in text and "1× Raumwechsel" in text
 
 
 def test_render_summary_nennt_gesamtzahl():
-    aenderungen = [Change("cancelled", lesson(uid=i, start=f"{i:02d}:00")) for i in range(5)]
+    aenderungen = [Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
+                   for i in range(5)]
     assert "<b>5 Änderungen</b>" in bot.render_summary(aenderungen, HEUTE)
 
 
 def test_render_summary_einzahl_bei_einem_tag():
-    aenderungen = [Change("cancelled", lesson(uid=i, start=f"{i:02d}:00")) for i in range(3)]
+    aenderungen = [Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
+                   for i in range(3)]
     assert "1 Tag:" in bot.render_summary(aenderungen, HEUTE)
 
 
@@ -1387,7 +1393,8 @@ def test_render_plan_streicht_ausfall_durch():
 
 
 def test_render_plan_sortiert():
-    stunden = [lesson(uid=1, date=MI, start="11:30"), lesson(uid=2, date=MO, start="07:40")]
+    stunden = [lesson(uid=1, date=MI, start="11:30"),
+               lesson(uid=2, date=MO, start="07:40")]
     text = bot.render_plan(stunden, HEUTE)
     assert text.index("Montag") < text.index("Mittwoch")
 
@@ -1421,7 +1428,8 @@ def test_split_bricht_ueberlange_einzelzeile_um():
 
 def test_split_verliert_nichts():
     text = "\n".join(f"Zeile {i}" for i in range(200))
-    assert "".join(bot.split(text, limit=180)).replace("\n", "") == text.replace("\n", "")
+    assert "".join(bot.split(text, limit=180)).replace("\n", "") == \
+           text.replace("\n", "")
 
 
 def test_split_wirft_leere_teile_weg():
@@ -1574,7 +1582,7 @@ def test_send_an_einen_chat(cfg, monkeypatch):
 
 
 def test_send_an_mehrere_chats(cfg, monkeypatch):
-    cfg = bot.dataclasses.replace(cfg, telegram_chats=("42", "43"))
+    cfg = dataclasses.replace(cfg, telegram_chats=("42", "43"))
     aufrufe = antworten(monkeypatch)
     assert bot.send(cfg, "Hallo") == 2
     assert [a["payload"]["chat_id"] for a in aufrufe] == ["42", "43"]
@@ -1595,7 +1603,7 @@ def test_send_stiller_versand(cfg, monkeypatch):
 def test_send_ein_kaputter_chat_stoppt_die_anderen_nicht(cfg, monkeypatch):
     """Sonst kaeme dieselbe Meldung beim naechsten Durchlauf bei allen
     anderen erneut an."""
-    cfg = bot.dataclasses.replace(cfg, telegram_chats=("kaputt", "43"))
+    cfg = dataclasses.replace(cfg, telegram_chats=("kaputt", "43"))
     aufrufe = []
 
     def fake_post(url, json=None, timeout=None):
@@ -1611,7 +1619,7 @@ def test_send_ein_kaputter_chat_stoppt_die_anderen_nicht(cfg, monkeypatch):
 
 
 def test_send_ohne_empfaenger(cfg):
-    cfg = bot.dataclasses.replace(cfg, telegram_chats=())
+    cfg = dataclasses.replace(cfg, telegram_chats=())
     with pytest.raises(TelegramError, match="Kein Empfaenger"):
         bot.send(cfg, "Hallo")
 
@@ -1626,7 +1634,7 @@ def test_send_alle_dauerhaft_kaputt_meldet_konfigurationsfehler(cfg, monkeypatch
 def test_send_gemischte_fehler_melden_den_voruebergehenden(cfg, monkeypatch):
     """Ein zufaelliger 503 daneben darf nicht als Konfigurationsfehler
     gelten und den ganzen Lauf beenden."""
-    cfg = bot.dataclasses.replace(cfg, telegram_chats=("a", "b"))
+    cfg = dataclasses.replace(cfg, telegram_chats=("a", "b"))
 
     def fake_post(url, json=None, timeout=None):
         if json["chat_id"] == "a":
@@ -1701,7 +1709,8 @@ def test_fingerprint_aendert_sich_bei_ausfall():
 
 
 def test_fingerprint_aendert_sich_bei_raumwechsel():
-    assert bot.fingerprint([lesson(rooms=("R1",))]) != bot.fingerprint([lesson(rooms=("R2",))])
+    assert bot.fingerprint([lesson(rooms=("R1",))]) != \
+           bot.fingerprint([lesson(rooms=("R2",))])
 
 
 def test_fingerprint_leer_ist_definiert():
@@ -1844,7 +1853,7 @@ def test_load_state_liest_pending(tmp_path):
 
 
 def test_state_ist_unveraenderlich():
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         State(exists=True).exists = False
 
 
@@ -1887,9 +1896,11 @@ def ablauf(monkeypatch, tmp_path):
 
     monkeypatch.setattr(bot, "send",
                         lambda _cfg, text, **_k: protokoll["gesendet"].append(text))
-    monkeypatch.setattr(bot, "commit_state",
-                        lambda *_a, **_k: protokoll.__setitem__("committed",
-                                                                protokoll["committed"] + 1))
+    def fake_commit(*_a, **_k):
+        protokoll["committed"] += 1
+        return True
+
+    monkeypatch.setattr(bot, "commit_state", fake_commit)
     monkeypatch.setattr(bot, "now_local",
                         lambda _tz: dt.datetime(2026, 9, 14, 8, 0))
     protokoll["pfad"] = tmp_path / "state.json"
@@ -1983,7 +1994,7 @@ def test_check_dauerhafter_telegram_fehler_ist_fatal(cfg, ablauf):
 def test_check_nutzt_das_stundenraster_fuer_doppelstunden(cfg, ablauf):
     alt = [lesson(uid=1, start="07:40", end="08:25", rooms=("R1",)),
            lesson(uid=2, start="08:30", end="09:15", rooms=("R1",))]
-    neu = [bot.dataclasses.replace(l, rooms=("R2",)) for l in alt]
+    neu = [dataclasses.replace(stunde, rooms=("R2",)) for stunde in alt]
     untis_liefert(ablauf, alt, periods=RASTER)
     bot.check_once(cfg, state_path=ablauf["pfad"])
     untis_liefert(ablauf, neu, periods=RASTER)
@@ -1994,7 +2005,7 @@ def test_check_nutzt_das_stundenraster_fuer_doppelstunden(cfg, ablauf):
 def test_check_ohne_raster_zwei_zeilen(cfg, ablauf):
     alt = [lesson(uid=1, start="07:40", rooms=("R1",)),
            lesson(uid=2, start="08:30", rooms=("R1",))]
-    neu = [bot.dataclasses.replace(l, rooms=("R2",)) for l in alt]
+    neu = [dataclasses.replace(stunde, rooms=("R2",)) for stunde in alt]
     untis_liefert(ablauf, alt)
     bot.check_once(cfg, state_path=ablauf["pfad"])
     untis_liefert(ablauf, neu)
@@ -2065,7 +2076,7 @@ def test_check_schwankende_lage_wird_nach_pending_limit_akzeptiert(cfg, ablauf):
 
     for runde in range(bot.PENDING_LIMIT):
         # Jedes Mal eine andere Teilmenge -- der Fingerabdruck wechselt.
-        untis_liefert(ablauf, viele[:1] + [lesson(uid=90 + runde, start="20:00")])
+        untis_liefert(ablauf, [*viele[:1], lesson(uid=90 + runde, start="20:00")])
         bot.check_once(cfg, state_path=ablauf["pfad"])
 
     assert len(ablauf["gesendet"]) == 1
@@ -2505,7 +2516,7 @@ def test_timegrid_fehler_wird_nicht_zwischengespeichert(cfg):
 def test_timegrid_cache_trennt_schulen(cfg):
     grid = [FakeGridDay(2, [FakeTimeUnit("1", "07:40", "08:25")])]
     untis_mit(cfg, FakeSession(grid=grid)).timegrid()
-    andere = bot.dataclasses.replace(cfg, untis_school="andere-schule")
+    andere = dataclasses.replace(cfg, untis_school="andere-schule")
     abrufe = []
 
     class ZaehlendeSession(FakeSession):
@@ -2538,7 +2549,7 @@ def test_convert_sortiert(cfg):
     frueh = FakePeriod({"id": 2}, start=dt.datetime(2026, 9, 14, 7, 40),
                        end=dt.datetime(2026, 9, 14, 8, 25))
     stunden = bot.Untis._convert([spaet, frueh], resolve_by_name)
-    assert [l.start for l in stunden] == ["07:40", "11:30"]
+    assert [stunde.start for stunde in stunden] == ["07:40", "11:30"]
 
 
 def test_strategies_ohne_klasse(cfg):
@@ -2547,7 +2558,7 @@ def test_strategies_ohne_klasse(cfg):
 
 
 def test_strategies_mit_klasse(cfg):
-    cfg = bot.dataclasses.replace(cfg, untis_klasse="K1")
+    cfg = dataclasses.replace(cfg, untis_klasse="K1")
     wege = bot.Untis(cfg)._strategies(dt.date(2026, 9, 14), dt.date(2026, 9, 21))
     assert [name for name, _ in wege] == ["my_timetable", "klasse:K1"]
 
@@ -2555,7 +2566,7 @@ def test_strategies_mit_klasse(cfg):
 def test_timetable_leere_saubere_antwort_ist_nothingtodo(cfg, monkeypatch):
     """Eine saubere leere Antwort beendet die Suche -- sonst liefert der Bot
     stillschweigend den KLASSENPLAN, eine voellig andere Datenmenge."""
-    u = untis_mit(bot.dataclasses.replace(cfg, untis_klasse="K1"), FakeSession())
+    u = untis_mit(dataclasses.replace(cfg, untis_klasse="K1"), FakeSession())
     monkeypatch.setattr(u, "_strategies",
                         lambda s, e: [("my_timetable", lambda: []),
                                       ("klasse:K1", lambda: [FakePeriod({"id": 1})])])
@@ -2564,7 +2575,7 @@ def test_timetable_leere_saubere_antwort_ist_nothingtodo(cfg, monkeypatch):
 
 
 def test_timetable_faellt_bei_fehler_auf_klassenplan_zurueck(cfg, monkeypatch):
-    u = untis_mit(bot.dataclasses.replace(cfg, untis_klasse="K1"), FakeSession())
+    u = untis_mit(dataclasses.replace(cfg, untis_klasse="K1"), FakeSession())
 
     def erster():
         raise RuntimeError("keine Berechtigung")
@@ -2610,8 +2621,10 @@ def test_timetable_alle_wege_kaputt(cfg, monkeypatch):
 
 def test_main_konfigurationsfehler_gibt_1(monkeypatch, capsys):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env",
-                        staticmethod(lambda: (_ for _ in ()).throw(ConfigError("fehlt"))))
+    def kaputt():
+        raise ConfigError("fehlt")
+
+    monkeypatch.setattr(Config, "from_env", staticmethod(kaputt))
     assert bot.main(["check"]) == 1
     assert "KONFIGURATIONSFEHLER" in capsys.readouterr().err
 

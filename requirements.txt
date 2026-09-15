@@ -2,5 +2,8 @@
 requests>=2.32,<3
 webuntis>=0.1.24
 
-# Nur fuer die Tests
+# Nur fuer die Pruefungen (pytest und ruff), nicht fuer den Betrieb. Sie
+# stehen trotzdem hier statt in einer zweiten Datei: Eine Datei weniger ist
+# mehr wert als die zwei Sekunden, die der Bot-Job laenger installiert.
 pytest>=8.0
+ruff>=0.5

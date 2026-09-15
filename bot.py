@@ -9,10 +9,11 @@ Aufbau, von innen nach aussen:
 
     Modell      Lesson, Change      -- unveraenderliche Datensaetze
     Rein        normalise, diff,    -- Funktionen ohne Seiteneffekte,
-                render                 vollstaendig testbar ohne Netz
-    Randschicht untis, telegram,    -- alles I/O, duenn gehalten
-                store
-    Ablauf      check, watch        -- setzt die Teile zusammen
+                compare, Entry,        vollstaendig testbar ohne Netz
+                render
+    Randschicht Untis, telegram,    -- alles I/O, duenn gehalten
+                Zustand, git
+    Ablauf      check_once, watch   -- setzt die Teile zusammen
 
 Aufrufe:
 
@@ -36,9 +37,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any
 
 import requests
 
@@ -76,7 +78,7 @@ class Config:
     lookahead_days: int = 7
     timezone: str = "Europe/Berlin"
     @staticmethod
-    def from_env() -> "Config":
+    def from_env() -> Config:
         """Liest die Konfiguration aus Umgebungsvariablen.
 
         Die einzige Stelle im Programm, die os.environ anfasst.
@@ -104,7 +106,8 @@ class Config:
                 f"  Bekommen: {mask(token)}"
             )
 
-        chats = tuple(c.strip() for c in need("TELEGRAM_CHAT_ID").split(",") if c.strip())
+        chats = tuple(c.strip() for c in need("TELEGRAM_CHAT_ID").split(",")
+                      if c.strip())
         if not chats:
             raise ConfigError("TELEGRAM_CHAT_ID enthaelt keine gueltige ID.")
 
@@ -231,7 +234,7 @@ class Lesson:
         return dataclasses.asdict(self)
 
     @staticmethod
-    def from_json(raw: dict) -> "Lesson":
+    def from_json(raw: dict) -> Lesson:
         fields = {f.name for f in dataclasses.fields(Lesson)}
         data = {k: v for k, v in raw.items() if k in fields}
         for name in ("subjects", "teachers", "rooms"):
@@ -312,7 +315,8 @@ def _text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
-def normalise(period: Any, resolve: Callable[[str, Iterable], tuple[str, ...]]) -> Lesson:
+def normalise(period: Any,
+              resolve: Callable[[str, Iterable], tuple[str, ...]]) -> Lesson:
     """Wandelt ein WebUntis-Objekt in eine Lesson.
 
     'resolve' loest Fach-/Raum-/Lehrer-IDs in Namen auf. Als Funktion
@@ -356,7 +360,7 @@ class Untis:
 
     # -- Lebenszyklus ------------------------------------------------------
 
-    def __enter__(self) -> "Untis":
+    def __enter__(self) -> Untis:
         import webuntis
 
         self._session = webuntis.Session(
@@ -471,7 +475,8 @@ class Untis:
                 grid[weekday] = units
         except Exception as exc:
             log.debug("Stundenraster nicht abrufbar: %s", exc)
-            return {}   # bewusst NICHT gecacht -- naechster Poll darf's erneut versuchen
+            # Bewusst NICHT gecacht -- der naechste Poll darf es erneut versuchen.
+            return {}
 
         _TIMEGRID_CACHE[cache_key] = grid
         return grid
@@ -585,12 +590,22 @@ class Untis:
             except Exception as exc:
                 log.warning("Stunde uebersprungen (%s): %r",
                             exc, getattr(period, "_data", None))
-        return sorted(lessons, key=lambda l: (l.date, l.start, l.key))
+        return sorted(lessons, key=chronological)
 
 
 # ===========================================================================
 #  Vergleich  (rein)
 # ===========================================================================
+
+def chronological(lesson: Lesson) -> tuple[str, str, str]:
+    """Sortierschluessel fuer Stunden: Tag, Uhrzeit, fachlicher Schluessel.
+
+    Der Schluessel als drittes Feld macht die Reihenfolge eindeutig -- ohne
+    ihn haengt bei zwei gleichzeitigen Stunden (Parallelkurse) die
+    Reihenfolge davon ab, wie WebUntis sie gerade ausliefert.
+    """
+    return (lesson.date, lesson.start, lesson.key)
+
 
 def window_of(days: int, today: dt.date) -> tuple[dt.date, dt.date]:
     return today, today + dt.timedelta(days=days)
@@ -613,11 +628,12 @@ def overlap(
     return (start, end) if start <= end else None
 
 
-def within(lessons: Iterable[Lesson], win: tuple[dt.date, dt.date] | None) -> list[Lesson]:
+def within(lessons: Iterable[Lesson],
+           win: tuple[dt.date, dt.date] | None) -> list[Lesson]:
     if win is None:
         return list(lessons)
     start, end = win
-    return [l for l in lessons if start <= l.day <= end]
+    return [lesson for lesson in lessons if start <= lesson.day <= end]
 
 
 def pair_up(
@@ -664,7 +680,7 @@ def pair_up(
     # die zufaellig zuerst gelistete -- und der Bot meldete Aenderungen, die
     # es nicht gibt. Welche das ist, haengt allein daran, in welcher
     # Reihenfolge WebUntis den Zeitraum ausliefert.
-    free = [l for l in right if id(l) not in matched_right]
+    free = [lesson for lesson in right if id(lesson) not in matched_right]
     candidates: list[tuple[int, int, int, Lesson, Lesson]] = []
     for i, lesson in enumerate(rest_left):
         for j, other in enumerate(free):
@@ -684,8 +700,9 @@ def pair_up(
         taken_right.add(j)
         matched_right.add(id(other))
 
-    still_left = [l for i, l in enumerate(rest_left) if i not in taken_left]
-    only_new = [l for l in right if id(l) not in matched_right]
+    still_left = [lesson for i, lesson in enumerate(rest_left)
+                  if i not in taken_left]
+    only_new = [lesson for lesson in right if id(lesson) not in matched_right]
     return pairs, still_left, only_new
 
 
@@ -834,7 +851,7 @@ def check_plausible(
     verschwunden, die nur aus dem rollenden Fenster gerutscht sind.
     """
     old, new = within(old, win), within(new, win)
-    alive = [l for l in old if l.status != CANCELLED]
+    alive = [lesson for lesson in old if lesson.status != CANCELLED]
     if not alive:
         return
 
@@ -844,9 +861,9 @@ def check_plausible(
         )
 
     _pairs, only_old, _only_new = pair_up(old, new)
-    new_keys = {l.key for l in new}
-    vanished = [l for l in only_old
-                if l.status != CANCELLED and l.key not in new_keys]
+    new_keys = {lesson.key for lesson in new}
+    vanished = [lesson for lesson in only_old
+                if lesson.status != CANCELLED and lesson.key not in new_keys]
 
     ratio = len(vanished) / len(alive)
     if ratio > max_vanish:
@@ -1160,7 +1177,7 @@ def render_plan(lessons: Sequence[Lesson], today: dt.date) -> str:
 
     lines: list[str] = []
     current: str | None = None
-    for lesson in sorted(lessons, key=lambda l: (l.date, l.start)):
+    for lesson in sorted(lessons, key=chronological):
         if lesson.date != current:
             current = lesson.date
             rel = relative(current, today)
@@ -1297,14 +1314,16 @@ def telegram_call(token: str, method: str, payload: dict) -> dict:
     raise last or TelegramError(f"{method} nach {ATTEMPTS} Versuchen gescheitert")
 
 
-def _backoff(attempt: int, method: str, why: str, override: float | None = None) -> None:
+def _backoff(attempt: int, method: str, why: str,
+             override: float | None = None) -> None:
     if attempt >= ATTEMPTS:
         return
     # Telegram nennt bei Flood-Control durchaus dreistellige Sekundenwerte.
     # Ungebremst blockierte das den 5-Minuten-Takt und liefe gegen das
     # Job-Zeitlimit -- deshalb gedeckelt.
     try:
-        wait = max(0.0, min(float(override), 30.0)) if override is not None else 2 ** (attempt - 1)
+        wait = (max(0.0, min(float(override), 30.0)) if override is not None
+                else 2 ** (attempt - 1))
     except (TypeError, ValueError):
         wait = 2 ** (attempt - 1)
     log.warning("%s Versuch %d/%d fehlgeschlagen (%s) -- erneut in %.0fs",
@@ -1419,7 +1438,8 @@ def fingerprint(lessons: Sequence[Lesson]) -> str:
     """Kurzer, stabiler Fingerabdruck einer Stundenliste."""
     import hashlib
 
-    material = "|".join(sorted(f"{l.key}#{l.status}#{l.rooms}" for l in lessons))
+    material = "|".join(sorted(f"{lesson.key}#{lesson.status}#{lesson.rooms}"
+                               for lesson in lessons))
     return hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
@@ -1503,7 +1523,7 @@ def save_state(lessons: Sequence[Lesson], win: tuple[dt.date, dt.date],
     # Tupel, aus der Datei kommen Listen zurueck. Ohne diesen Schritt gaelte
     # jeder Zustand als veraendert -- und im 5-Minuten-Takt entstuende genau
     # die Commit-Flut, die dieser Vergleich verhindern soll.
-    payload_lessons = json.loads(json.dumps([l.to_json() for l in lessons]))
+    payload_lessons = json.loads(json.dumps([lesson.to_json() for lesson in lessons]))
 
     if path.exists():
         try:
@@ -1586,7 +1606,8 @@ def _commit_state(path: Path) -> bool:
         git("add", "-f", str(path.name))
 
     if git("diff", "--staged", "--quiet").returncode != 0:
-        if git("commit", "-q", "-m", "state: Stundenplan-Zustand [skip ci]").returncode != 0:
+        commit = git("commit", "-q", "-m", "state: Stundenplan-Zustand [skip ci]")
+        if commit.returncode != 0:
             log.warning("git commit fehlgeschlagen")
             return False
 
@@ -1883,8 +1904,10 @@ def demo_changes(today: dt.date) -> list[Change]:
 
     return [
         # Doppelstunde faellt aus -- wird zu einem Eintrag zusammengefasst
-        Change("cancelled", stunde(1, today, "07:40", "08:25", "M"), "Lehrkraft erkrankt"),
-        Change("cancelled", stunde(2, today, "08:30", "09:15", "M"), "Lehrkraft erkrankt"),
+        Change("cancelled", stunde(1, today, "07:40", "08:25", "M"),
+               "Lehrkraft erkrankt"),
+        Change("cancelled", stunde(2, today, "08:30", "09:15", "M"),
+               "Lehrkraft erkrankt"),
         # Vertretung MIT Raumwechsel ueber eine Doppelstunde -- ein Eintrag,
         # zwei Arten. Genau der Fall, fuer den die Buendelung gebaut wurde.
         Change("teacher", stunde(3, today, "09:35", "10:20", "D"), "Abel → Zeh"),
@@ -1941,7 +1964,7 @@ def testmessage(cfg: Config) -> int:
     text = render(demo_changes(today), today,
                   header="TESTNACHRICHT — so sehen Änderungen künftig aus",
                   periods=DEMO_RASTER)
-    text = "\n".join([text] + diagnose_lines(cfg))
+    text = "\n".join([text, *diagnose_lines(cfg)])
 
     try:
         erreicht = send(cfg, text)
@@ -1949,7 +1972,8 @@ def testmessage(cfg: Config) -> int:
         print(f"FEHLER: Testnachricht nicht zugestellt:\n{exc}", file=sys.stderr)
         return 1
 
-    print(f"Testnachricht an {erreicht} von {len(cfg.telegram_chats)} Chat(s) gesendet.")
+    print(f"Testnachricht an {erreicht} von {len(cfg.telegram_chats)} "
+          "Chat(s) gesendet.")
     return 0
 
 
@@ -1973,13 +1997,14 @@ def show(cfg: Config, days: int | None) -> int:
             current = lesson.date
             print(f"\n{day_header(current)}")
             print("  " + "-" * 52)
-        mark = {CANCELLED: "<< ENTFAELLT", IRREGULAR: "<< AENDERUNG"}.get(lesson.status, "")
+        mark = {CANCELLED: "<< ENTFAELLT",
+                IRREGULAR: "<< AENDERUNG"}.get(lesson.status, "")
         print(f"  {lesson.start}-{lesson.end}  {lesson.title[:14]:14} "
               f"{_join(lesson.rooms)[:12]:12} {mark}")
         if lesson.note:
             print(f"       Info: {lesson.note}")
 
-    changed = sum(1 for l in lessons if l.status != REGULAR)
+    changed = sum(1 for lesson in lessons if lesson.status != REGULAR)
     print(f"\n{len(lessons)} Stunden, davon {changed} mit Aenderungsmarkierung.")
     return 0
 

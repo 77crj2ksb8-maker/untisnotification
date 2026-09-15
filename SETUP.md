@@ -122,14 +122,7 @@ git clone <dein-repo>
 cd untisnotification
 pip install -r requirements.txt
 
-cat > .env <<'EOF'
-TELEGRAM_BOT_TOKEN=123456789:AAH-xxxxxxxxxxxxxxxxxxxxx
-TELEGRAM_CHAT_ID=987654321
-WEBUNTIS_SERVER=ajax.webuntis.com
-WEBUNTIS_SCHOOL=ks-musterstadt
-WEBUNTIS_USERNAME=max.mustermann
-WEBUNTIS_PASSWORD=geheim
-EOF
+cp .env.example .env            # und ausfüllen
 
 python bot.py selftest          # jeden Zugang einzeln prüfen
 python bot.py show              # Stundenplan im Klartext

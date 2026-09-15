@@ -1,0 +1,48 @@
+# Werkzeug-Konfiguration. Das Projekt hat bewusst keine Paketstruktur --
+# bot.py ist ein Skript, keine Bibliothek. Hier steht nur, wie geprueft wird.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Damit "pytest" aus jedem Verzeichnis funktioniert und tests/test_bot.py
+# bot.py findet, ohne sys.path von Hand zu biegen.
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]
+
+# Bewusst abgewaehlt -- jede Zeile hier ist eine Entscheidung, keine Bequemlichkeit:
+ignore = [
+    # Die Nachrichten sind fuer Menschen, nicht fuer Parser. Emoji als
+    # Aenderungssymbole und deutsche Typografie (Gedankenstrich, Mittelpunkt)
+    # sind genau das, was dort stehen soll.
+    "RUF001", "RUF002", "RUF003",
+
+    # try/except/pass sagt hier klar "misslingt das, ist es egal" --
+    # Aufraeumen einer Temporaerdatei, ein Logout beim Beenden. Ein
+    # contextlib.suppress daneben waere kuerzer, aber nicht deutlicher.
+    "SIM105",
+
+    # In _commit_state ruft das innere if den Befehl AUF, der committet.
+    # Zu "if a and b" zusammengezogen verschwaende das, dass die zweite
+    # Bedingung eine Wirkung hat.
+    "SIM102",
+
+    # Fehlalarm: save_state oeffnet die Temporaerdatei mit delete=False und
+    # nutzt sie zwei Zeilen spaeter in einem "with"-Block. Genau so muss es
+    # sein, damit os.replace() danach noch auf die Datei zugreifen kann.
+    "SIM115",
+
+    # Attrappen in den Tests sind absichtlich minimal. Ein ClassVar-Hinweis
+    # auf einer dreizeiligen Fake-Klasse ist mehr Zeremonie als Nutzen.
+    "RUF012",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/ setzt sys.path, bevor bot importiert wird -- der Import MUSS danach
+# stehen. Die betroffenen Zeilen tragen ein eigenes noqa.
+"tests/*" = []
