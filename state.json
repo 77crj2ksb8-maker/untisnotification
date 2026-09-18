@@ -1,114 +1,12 @@
 {
  "schema": 2,
- "saved_at": "2026-09-17T09:18:46+00:00",
+ "saved_at": "2026-09-18T08:54:08+00:00",
  "window": {
-  "from": "2026-09-17",
-  "to": "2026-09-24"
+  "from": "2026-09-18",
+  "to": "2026-09-25"
  },
  "pending": "",
  "lessons": [
-  {
-   "uid": 842780,
-   "date": "2026-09-17",
-   "start": "09:20",
-   "end": "10:05",
-   "subjects": [
-    "D(G2)"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.04"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "D(G2)_3WGI13_13WGW13_2_MG",
-   "lesson_no": 109200
-  },
-  {
-   "uid": 842783,
-   "date": "2026-09-17",
-   "start": "10:25",
-   "end": "11:10",
-   "subjects": [
-    "D(G2)"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.04"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "D(G2)_3WGI13_13WGW13_2_MG",
-   "lesson_no": 109200
-  },
-  {
-   "uid": 817210,
-   "date": "2026-09-17",
-   "start": "11:15",
-   "end": "12:00",
-   "subjects": [
-    "PH"
-   ],
-   "teachers": [],
-   "rooms": [
-    "Ph_0.03"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "PH_3WGI13_13WGW13_2_Za",
-   "lesson_no": 108900
-  },
-  {
-   "uid": 817213,
-   "date": "2026-09-17",
-   "start": "12:05",
-   "end": "12:50",
-   "subjects": [
-    "PH"
-   ],
-   "teachers": [],
-   "rooms": [
-    "Ph_0.03"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "PH_3WGI13_13WGW13_2_Za",
-   "lesson_no": 108900
-  },
-  {
-   "uid": 801827,
-   "date": "2026-09-17",
-   "start": "13:25",
-   "end": "14:10",
-   "subjects": [
-    "E"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "",
-   "lesson_no": 9900
-  },
-  {
-   "uid": 801830,
-   "date": "2026-09-17",
-   "start": "14:15",
-   "end": "15:00",
-   "subjects": [
-    "E"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "",
-   "lesson_no": 9900
-  },
   {
    "uid": 808358,
    "date": "2026-09-18",
@@ -686,6 +584,74 @@
    "note": "",
    "group": "",
    "lesson_no": 9900
+  },
+  {
+   "uid": 808364,
+   "date": "2026-09-25",
+   "start": "07:40",
+   "end": "08:25",
+   "subjects": [
+    "GGK"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 12600
+  },
+  {
+   "uid": 808367,
+   "date": "2026-09-25",
+   "start": "08:30",
+   "end": "09:15",
+   "subjects": [
+    "GGK"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "",
+   "lesson_no": 12600
+  },
+  {
+   "uid": 826837,
+   "date": "2026-09-25",
+   "start": "11:15",
+   "end": "12:00",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
+  },
+  {
+   "uid": 826840,
+   "date": "2026-09-25",
+   "start": "12:05",
+   "end": "12:50",
+   "subjects": [
+    "VBRW(E)"
+   ],
+   "teachers": [],
+   "rooms": [
+    "H1.01"
+   ],
+   "status": "regular",
+   "note": "",
+   "group": "VBRW(E)_3WGI13_1_Da",
+   "lesson_no": 109900
   }
  ]
 }
