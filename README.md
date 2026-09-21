@@ -35,6 +35,8 @@ Einrichtung im eigenen Repo: **[SETUP.md](SETUP.md)**.
 * **Bremse gegen Fehlalarme** — liefert WebUntis wegen Wartung plötzlich viel
   weniger Stunden, meldet der Bot nicht „alles entfällt", sondern wartet auf
   Bestätigung.
+* **Dauerbetrieb rund um die Uhr** — alle 5 Minuten in der Schulzeit, alle 30
+  Minuten nachts und am Wochenende.
 
 ## Befehle
 
@@ -42,7 +44,7 @@ Einrichtung im eigenen Repo: **[SETUP.md](SETUP.md)**.
 |---|---|
 | `python bot.py check` | einmal prüfen, melden, Zustand sichern |
 | `python bot.py check --dry-run` | prüfen und die Nachricht ausgeben, ohne zu senden oder zu speichern |
-| `python bot.py watch --minutes 55` | 55 Minuten lang alle 5 Minuten prüfen (`--interval` in Sekunden, Standard 300) |
+| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst |
 | `python bot.py selftest` | jeden Zugang einzeln durchtesten und sagen, was klemmt |
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py show --days 3` | Stundenplan im Klartext anzeigen |
@@ -75,18 +77,38 @@ Code-Änderung.
 
 ## Wie es läuft
 
-GitHubs Zeitplaner hält kurze Intervalle nicht ein. In diesem Repo kamen von
-rund 28 geplanten Auslösungen an einem Schultag **zwei** tatsächlich zustande
-— „alle 5 Minuten" ist über Cron nicht zu haben.
+Zwei Dinge stehen dem Dauerbetrieb im Weg:
 
-Deshalb taktet der Bot selbst: Ein gestarteter Lauf prüft 55 Minuten lang alle
-5 Minuten. Der Zeitplaner muss nur noch *überhaupt* einen Lauf anstoßen. Der
-Trigger steht auf halbstündlich, obwohl ein Lauf 55 Minuten dauert — fällt ein
-Start aus, springt der nächste ein, und die `concurrency`-Gruppe verhindert
-Parallelläufe.
+1. **GitHubs Zeitplaner hält seinen eigenen Plan nicht ein.** Gemessen kamen an
+   einem Werktag rund **10 von 48** geplanten Auslösungen tatsächlich zustande.
+2. **Ein Actions-Job darf höchstens 6 Stunden laufen.** Ein echter
+   Dauerprozess ist also gar nicht möglich.
 
-Das heißt aber auch: **Lückenlos ist die Überwachung nicht.** Sie ist so gut,
-wie GitHub Läufe startet.
+Die Lösung ist eine Kette statt eines Dauerlaufs. Sie beruht auf einer
+Eigenschaft der `concurrency`-Gruppe: Trifft ein Lauf ein, während einer läuft,
+wird er nicht verworfen, sondern **wartet**. Ein bereits wartender Lauf wird
+dabei vom neueren ersetzt — es steht also immer genau einer bereit. Endet der
+laufende, übernimmt der wartende im selben Moment.
+
+```
+Lauf A  ├────────── 5,5 h ──────────┤
+Cron         ↓ B wartet  ↓ C ersetzt B  ↓ D ersetzt C
+Lauf D                               ├────────── 5,5 h ──────────┤
+```
+
+Solange der Zeitplaner innerhalb von 5,5 Stunden **auch nur ein einziges Mal**
+auslöst, reißt die Kette nicht ab. Bei rund 10 Auslösungen pro Tag ist das
+reichlich Sicherheitsabstand.
+
+Den Takt innerhalb eines Laufs macht der Bot selbst — und zwar nach Tageszeit:
+alle 5 Minuten werktags zwischen 6 und 19 Uhr, sonst alle 30 Minuten. Nachts im
+Fünfminutentakt zu fragen wäre sinnlose Last: Jede Abfrage ist eine
+vollständige WebUntis-Anmeldung. Verpasst wird dabei nichts — was um 2 Uhr
+nachts eingetragen wird, steht spätestens eine halbe Stunde später im Chat.
+
+In der Lauf-Liste tauchen regelmäßig **abgebrochene** Einträge auf. Das ist kein
+Fehler, sondern genau der Mechanismus: wartende Läufe, die von einem neueren
+wartenden ersetzt wurden.
 
 Sein Gedächtnis ist `state.json` im Repo — der Bot committet sie nach jedem
 Durchlauf selbst. Unveränderte Zustände werden nicht neu geschrieben, sonst
@@ -111,7 +133,7 @@ gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
 ```
 bot.py                              der ganze Bot
-tests/test_bot.py                   366 Tests, ohne Netz lauffähig
+tests/test_bot.py                   391 Tests, ohne Netz lauffähig
 pyproject.toml                      Einstellungen für pytest und ruff
 requirements.txt                    Abhängigkeiten
 .env.example                        Vorlage für die lokale Entwicklung
@@ -148,7 +170,7 @@ Logging statt Weiterreichen.
 ```bash
 pip install -r requirements.txt
 
-python -m pytest             # 366 Tests, keine Netzverbindung nötig
+python -m pytest             # 391 Tests, keine Netzverbindung nötig
 ruff check .                 # Linter
 ```
 

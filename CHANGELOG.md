@@ -2,6 +2,38 @@
 
 Das Format folgt lose [Keep a Changelog](https://keepachangelog.com/de/).
 
+## 2.2.0 — 2026-09-21
+
+### Neu
+
+* **Dauerbetrieb rund um die Uhr.** Der Cron läuft jetzt an jedem Tag zu jeder
+  Stunde und dient nur noch als Anlasser; jeder Lauf überwacht 5,5 Stunden
+  statt 55 Minuten. Die `concurrency`-Gruppe hält immer einen Lauf bereit, der
+  nahtlos übernimmt — so entsteht eine lückenlose Kette, obwohl ein einzelner
+  Actions-Job nur 6 Stunden laufen darf.
+* **Takt nach Tageszeit** (`interval_for`): alle 5 Minuten werktags zwischen 6
+  und 19 Uhr, sonst alle 30 Minuten. Neuer Schalter `--night-interval`; ohne
+  ihn bleibt der Takt konstant wie bisher. Spart im Dauerbetrieb rund zwei
+  Drittel der WebUntis-Anmeldungen.
+
+### Behoben
+
+* `render_summary` nahm ein Argument `today` entgegen und benutzte es nie. Die
+  Tests reichten dort ein Datum hinein, das stillschweigend als Zusatznotiz in
+  der Nachricht landete — sichtbar als Datumszeile unter der Überschrift. Das
+  Argument ist weg, ein Wächtertest hält die Stelle offen.
+* „1 Änderungen an 1 Tag" → „1 Änderung". In der Praxis unerreichbar, weil die
+  Kurzfassung erst ab 40 Änderungen greift.
+
+### Sonstiges
+
+* `confirm_or_hold()` aus `check_once` herausgelöst. Der Docstring von `State`
+  verwies schon auf diese Funktion — es gab sie nur nicht, die Logik stand
+  eingebettet in der mit Abstand längsten Funktion des Programms.
+* `bot.py` ist jetzt ausführbar; der Shebang war vorhanden, die Rechte fehlten.
+* `subprocess.run` mit ausdrücklichem `check=False`.
+* Testsuite: 366 → 391 Tests.
+
 ## 2.1.0 — 2026-09-15
 
 ### Neu

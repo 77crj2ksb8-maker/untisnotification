@@ -114,8 +114,9 @@ statt Stundennummern und fasst keine Doppelstunden zusammen.
 Kommt nichts an, lauf lokal `python bot.py selftest` (siehe unten) — der prüft
 jeden Zugang einzeln und sagt genau, welcher klemmt.
 
-Danach läuft der Bot von allein. Der Zeitplaner stößt ihn werktags an, jeder
-Lauf überwacht 55 Minuten.
+Danach läuft der Bot von allein — rund um die Uhr. Der Zeitplaner stößt die
+Kette an, jeder Lauf überwacht 5,5 Stunden und der nächste steht schon bereit.
+Geprüft wird alle 5 Minuten während der Schulzeit, sonst alle 30 Minuten.
 
 ## Lokal ausführen
 

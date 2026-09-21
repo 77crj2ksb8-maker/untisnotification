@@ -1342,40 +1342,55 @@ def test_render_summary_zaehlt_nach_art():
     aenderungen = [*[Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
                      for i in range(3)],
                    Change("room", lesson(uid=9, start="23:00"), "a → b")]
-    text = bot.render_summary(aenderungen, HEUTE)
+    text = bot.render_summary(aenderungen)
     assert "3× entfällt" in text and "1× Raumwechsel" in text
 
 
 def test_render_summary_nennt_gesamtzahl():
     aenderungen = [Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
                    for i in range(5)]
-    assert "<b>5 Änderungen</b>" in bot.render_summary(aenderungen, HEUTE)
+    assert "<b>5 Änderungen</b>" in bot.render_summary(aenderungen)
 
 
 def test_render_summary_einzahl_bei_einem_tag():
     aenderungen = [Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
                    for i in range(3)]
-    assert "1 Tag:" in bot.render_summary(aenderungen, HEUTE)
+    assert "1 Tag:" in bot.render_summary(aenderungen)
 
 
 def test_render_summary_mehrzahl_bei_mehreren_tagen():
     aenderungen = [Change("cancelled", lesson(uid=1, date=MO)),
                    Change("cancelled", lesson(uid=2, date=MI))]
-    assert "2 Tagen:" in bot.render_summary(aenderungen, HEUTE)
+    assert "2 Tagen:" in bot.render_summary(aenderungen)
 
 
 def test_render_summary_nennt_spanne():
     aenderungen = [Change("cancelled", lesson(uid=1, date=MO)),
                    Change("cancelled", lesson(uid=2, date=MI))]
-    text = bot.render_summary(aenderungen, HEUTE)
+    text = bot.render_summary(aenderungen)
     assert "Montag, 14.09. bis Mittwoch, 16.09." in text
 
 
 def test_render_summary_haelt_reihenfolge_der_arten_ein():
     aenderungen = [Change("room", lesson(uid=1, start="09:00"), "a → b"),
                    Change("cancelled", lesson(uid=2, start="10:00"))]
-    text = bot.render_summary(aenderungen, HEUTE)
+    text = bot.render_summary(aenderungen)
     assert text.index("entfällt") < text.index("Raumwechsel")
+
+
+def test_render_summary_ohne_notiz_keine_fremdzeile():
+    """Waechter gegen ein stilles Abrutschen von Argumenten: Ohne
+    bulk_note darf zwischen Ueberschrift und Zaehlung nichts stehen."""
+    aenderungen = [Change("cancelled", lesson(uid=1))]
+    zeilen = bot.strip_html(bot.render_summary(aenderungen)).splitlines()
+    assert zeilen[0] == "Stundenplan-Änderungen"
+    assert zeilen[1] == ""
+
+
+def test_render_summary_mit_notiz():
+    aenderungen = [Change("cancelled", lesson(uid=1))]
+    text = bot.render_summary(aenderungen, "Großflächig geändert.")
+    assert "<i>Großflächig geändert.</i>" in text
 
 
 def test_render_plan_leer():
@@ -1752,6 +1767,45 @@ def test_parse_pending_kaputter_zaehler():
 
 def test_parse_pending_none():
     assert bot.parse_pending(None) == ("", 0)
+
+
+def test_confirm_or_hold_erste_sichtung_wartet():
+    """Eine einzelne ungewoehnliche Lage ist noch kein Beweis."""
+    bestaetigt, pending, sichtung = bot.confirm_or_hold("", "abc")
+    assert bestaetigt is False
+    assert pending == "abc:1"
+    assert sichtung == 1
+
+
+def test_confirm_or_hold_zweimal_dieselbe_lage_bestaetigt():
+    bestaetigt, pending, sichtung = bot.confirm_or_hold("abc:1", "abc")
+    assert bestaetigt is True
+    assert pending == "abc:2" and sichtung == 2
+
+
+def test_confirm_or_hold_andere_lage_wartet_weiter():
+    """Schwankende Daten bestaetigen sich nicht gegenseitig ..."""
+    bestaetigt, pending, _ = bot.confirm_or_hold("abc:1", "xyz")
+    assert bestaetigt is False
+    assert pending == "xyz:2"
+
+
+def test_confirm_or_hold_zaehler_laeuft_trotz_wechsel_weiter():
+    """... aber der Zaehler laeuft weiter, sonst bliebe der Bot bei
+    schwankenden Teilantworten unbegrenzt still."""
+    _b, pending, sichtung = bot.confirm_or_hold("abc:4", "xyz")
+    assert sichtung == 5 and pending == "xyz:5"
+
+
+def test_confirm_or_hold_gibt_nach_pending_limit_auf():
+    bestaetigt, _p, sichtung = bot.confirm_or_hold(f"abc:{bot.PENDING_LIMIT - 1}",
+                                                   "voellig-andere-lage")
+    assert bestaetigt is True and sichtung == bot.PENDING_LIMIT
+
+
+def test_confirm_or_hold_kaputter_eintrag_kippt_nicht():
+    bestaetigt, pending, _s = bot.confirm_or_hold("voellig:kaputt", "abc")
+    assert bestaetigt is False and pending.startswith("abc:")
 
 
 def test_fingerprint_ist_stabil():
@@ -2303,6 +2357,121 @@ def watch_mit(monkeypatch, cfg, ergebnisse, minutes=55, interval=300):
     return code, len(laeufe)
 
 
+@pytest.mark.parametrize("wochentag,stunde,schulzeit", [
+    (0, 6, True), (0, 12, True), (0, 18, True),      # Montag, Schulzeit
+    (0, 5, False), (0, 19, False), (0, 23, False),   # Montag, Randzeiten
+    (4, 8, True),                                     # Freitag
+    (5, 8, False), (6, 8, False),                     # Samstag, Sonntag
+])
+def test_is_school_time(wochentag, stunde, schulzeit):
+    # 2026-09-14 ist ein Montag, also Wochentag 0.
+    tag = dt.date(2026, 9, 14) + dt.timedelta(days=wochentag)
+    jetzt = dt.datetime.combine(tag, dt.time(stunde, 0))
+    assert bot.is_school_time(jetzt) is schulzeit
+
+
+def test_interval_for_in_der_schulzeit():
+    montag_mittag = dt.datetime(2026, 9, 14, 12, 0)
+    assert bot.interval_for(montag_mittag, busy=300, idle=1800) == 300
+
+
+def test_interval_for_nachts():
+    montag_nachts = dt.datetime(2026, 9, 15, 3, 0)
+    assert bot.interval_for(montag_nachts, busy=300, idle=1800) == 1800
+
+
+def test_interval_for_am_wochenende():
+    samstag_mittag = dt.datetime(2026, 9, 19, 12, 0)
+    assert bot.interval_for(samstag_mittag, busy=300, idle=1800) == 1800
+
+
+def test_watch_ohne_night_interval_taktet_konstant(cfg, monkeypatch):
+    """Rueckwaertskompatibel: ohne den Wert aendert sich nichts."""
+    uhr = Uhr()
+    gewartet = []
+    monkeypatch.setattr(bot, "check_once", lambda _c: bot.Result(bot.OK))
+
+    def schlafe(s):
+        gewartet.append(s)
+        uhr.jetzt += s
+
+    bot.watch(cfg, 30, 300, sleeper=schlafe, clock=uhr)
+    assert gewartet and all(w == 300 for w in gewartet)
+
+
+def test_watch_nutzt_kurzen_takt_in_der_schulzeit(cfg, monkeypatch):
+    uhr = Uhr()
+    gewartet = []
+    monkeypatch.setattr(bot, "check_once", lambda _c: bot.Result(bot.OK))
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 14, 10, 0))
+
+    def schlafe(s):
+        gewartet.append(s)
+        uhr.jetzt += s
+
+    bot.watch(cfg, 30, 300, 1800, sleeper=schlafe, clock=uhr)
+    assert gewartet and all(w == 300 for w in gewartet)
+
+
+def test_watch_nutzt_langen_takt_nachts(cfg, monkeypatch):
+    """Nachts jede Stunde zwoelfmal anzumelden waere sinnlose Last."""
+    uhr = Uhr()
+    gewartet = []
+    monkeypatch.setattr(bot, "check_once", lambda _c: bot.Result(bot.OK))
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 15, 3, 0))
+
+    def schlafe(s):
+        gewartet.append(s)
+        uhr.jetzt += s
+
+    bot.watch(cfg, 120, 300, 1800, sleeper=schlafe, clock=uhr)
+    assert gewartet and all(w == 1800 for w in gewartet)
+
+
+def test_watch_zaehlt_im_nachttakt_weniger_durchlaeufe(cfg, monkeypatch):
+    """Derselbe Zeitraum, ein Sechstel der Anmeldungen."""
+    def laeufe(jetzt):
+        uhr = Uhr()
+        zaehler = []
+        monkeypatch.setattr(bot, "check_once",
+                            lambda _c: zaehler.append(1) or bot.Result(bot.OK))
+        monkeypatch.setattr(bot, "now_local", lambda _tz: jetzt)
+        bot.watch(cfg, 180, 300, 1800, sleeper=uhr.schlafe, clock=uhr)
+        return len(zaehler)
+
+    # 180 Minuten = 10800 s. Geprueft wird vor dem ersten Warten, deshalb
+    # jeweils ein Durchlauf mehr als 10800/Takt.
+    schulzeit = laeufe(dt.datetime(2026, 9, 14, 10, 0))
+    nachts = laeufe(dt.datetime(2026, 9, 15, 3, 0))
+    assert (schulzeit, nachts) == (37, 7)
+
+
+def test_watch_wechselt_den_takt_mitten_im_lauf(cfg, monkeypatch):
+    """Ein Lauf dauert 5,5 Stunden und ueberspannt damit die Grenze
+    zwischen Schul- und Nachtzeit. Der Takt muss mitwandern, nicht beim
+    Wert vom Start kleben bleiben."""
+    uhr = Uhr()
+    gewartet = []
+    # Wanduhr laeuft mit der Testuhr mit, Start 18:30 Uhr an einem Montag.
+    start = dt.datetime(2026, 9, 14, 18, 30)
+    monkeypatch.setattr(bot, "check_once", lambda _c: bot.Result(bot.OK))
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: start + dt.timedelta(seconds=uhr.jetzt))
+
+    def schlafe(s):
+        gewartet.append(s)
+        uhr.jetzt += s
+
+    bot.watch(cfg, 120, 300, 1800, sleeper=schlafe, clock=uhr)
+
+    # Bis 19:00 Uhr der kurze Takt, danach der lange.
+    assert gewartet[0] == 300
+    assert gewartet[-1] == 1800
+    assert set(gewartet) == {300, 1800}
+
+
 def test_watch_taktet_selbst(cfg, monkeypatch):
     """Der Grund fuer die Schleife: GitHubs Zeitplaner haelt 5 Minuten nicht
     ein. 55 Minuten / 5 Minuten ergeben elf Durchlaeufe."""
@@ -2735,9 +2904,11 @@ def test_main_watch_reicht_parameter_durch(cfg, monkeypatch):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
     monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
     monkeypatch.setattr(bot, "watch",
-                        lambda c, m, i: gesehen.update(minutes=m, interval=i) or 0)
-    bot.main(["watch", "--minutes", "12", "--interval", "60"])
-    assert gesehen == {"minutes": 12, "interval": 60}
+                        lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
+                                                          night=n) or 0)
+    bot.main(["watch", "--minutes", "12", "--interval", "60",
+              "--night-interval", "900"])
+    assert gesehen == {"minutes": 12, "interval": 60, "night": 900}
 
 
 def test_main_watch_standardwerte(cfg, monkeypatch):
@@ -2745,9 +2916,10 @@ def test_main_watch_standardwerte(cfg, monkeypatch):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
     monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
     monkeypatch.setattr(bot, "watch",
-                        lambda c, m, i: gesehen.update(minutes=m, interval=i) or 0)
+                        lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
+                                                          night=n) or 0)
     bot.main(["watch"])
-    assert gesehen == {"minutes": 55, "interval": 300}
+    assert gesehen == {"minutes": 55, "interval": 300, "night": None}
 
 
 def test_main_selftest(cfg, monkeypatch):

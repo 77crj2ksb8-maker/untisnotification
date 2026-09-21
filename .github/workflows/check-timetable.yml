@@ -1,30 +1,39 @@
 name: Stundenplan pruefen
 
-# Warum diese Konstruktion?
+# Warum diese Konstruktion? Ziel ist Dauerbetrieb rund um die Uhr.
 #
-# GitHubs Zeitplaner haelt kurze Intervalle nicht ein. Ein "alle 5 Minuten"
-# wird verzoegert, gebuendelt oder ganz verworfen -- in der Praxis kamen nur
-# eine Handvoll Laeufe pro Tag zustande. Fuer "erste Stunde faellt aus" ist
-# das nutzlos.
+# Zwei Dinge stehen dem im Weg:
 #
-# Deshalb taktet der Bot selbst: Ein gestarteter Lauf prueft 55 Minuten lang
-# alle 5 Minuten. Der Zeitplaner muss nur noch UEBERHAUPT einen Lauf starten,
-# nicht 288 puenktliche pro Tag.
+#   1. GitHubs Zeitplaner haelt kurze Intervalle nicht ein. Ein "alle 30
+#      Minuten" wird verzoegert, gebuendelt oder ganz verworfen -- gemessen
+#      kamen an einem Werktag rund 10 von 48 moeglichen Ausloesungen an.
+#   2. Ein einzelner Actions-Job darf hoechstens 6 Stunden laufen. Ein
+#      Dauerprozess ist also gar nicht moeglich.
 #
-# Der Trigger steht auf halbstuendlich, obwohl ein Lauf 55 Minuten dauert.
-# Das ist Absicht: Faellt ein Start aus, springt der naechste ein. Die
-# concurrency-Gruppe verhindert Parallellaeufe -- ein wartender Lauf startet
-# nahtlos, sobald der vorige endet.
+# Die Loesung ist eine Kette statt eines Dauerlaufs, und sie beruht auf
+# einer Eigenschaft der concurrency-Gruppe: Trifft ein neuer Lauf ein,
+# waehrend einer laeuft, wird er NICHT verworfen, sondern wartet. Ein
+# bereits wartender Lauf wird dabei durch den neueren ersetzt, es steht
+# also immer genau einer bereit. Endet der laufende, startet der wartende
+# im selben Moment.
 #
-# Ein Durchlauf dauert rund drei Sekunden, das Repo ist oeffentlich und hat
-# damit unbegrenzte Actions-Minuten. Es kostet also nichts.
+# Damit gilt: Solange der Zeitplaner innerhalb von 5,5 Stunden auch nur ein
+# einziges Mal ausloest, reisst die Kette nicht ab. Bei rund 10 Ausloesungen
+# pro Tag ist das reichlich Sicherheitsabstand.
+#
+# Den Takt innerhalb eines Laufs macht der Bot selbst: alle 5 Minuten in der
+# Schulzeit, alle 30 Minuten sonst. Nachts im Fuenfminutentakt zu fragen
+# waere sinnlose Last -- siehe interval_for() in bot.py.
+#
+# Das Repo ist oeffentlich und hat damit unbegrenzte Actions-Minuten. Der
+# Dauerbetrieb kostet nichts.
 
 on:
   schedule:
-    # Alle 30 Minuten, 4-17 UTC, Mo-Fr.
-    # UTC, weil GitHub keine Zeitzonen kennt -- das deckt 6:00-19:00 Ortszeit
-    # ab, in Winter- wie Sommerzeit.
-    - cron: "0,30 4-17 * * 1-5"
+    # Alle 30 Minuten, rund um die Uhr, an jedem Tag. Der Zeitplaner ist
+    # hier nur noch das Anlasserkabel: Er muss die Kette starten und nach
+    # einem Abriss neu anwerfen, nicht mehr jeden einzelnen Check ausloesen.
+    - cron: "0,30 * * * *"
   workflow_dispatch:
     inputs:
       modus:
@@ -39,13 +48,20 @@ on:
         description: "Wie lange dieser Lauf ueberwachen soll (nur bei modus=watch)"
         required: false
         default: "10"
+      # Der Standard ist bewusst kurz: Ein von Hand gestarteter Lauf soll
+      # schnell ein Ergebnis zeigen und nicht stundenlang den Platz in der
+      # concurrency-Gruppe blockieren.
 
 permissions:
   contents: write        # noetig, um state.json zurueckzuschreiben
 
 concurrency:
+  # Diese Gruppe ist das Herz des Dauerbetriebs, siehe Kopfkommentar: Sie
+  # sorgt dafuer, dass immer genau ein Lauf laeuft und genau einer bereit
+  # steht, der nahtlos uebernimmt.
+  #
   # Die Testnachricht bekommt eine eigene Gruppe. Sonst muesste sie hinter
-  # einem laufenden watch warten -- und das dauert bis zu 55 Minuten.
+  # einem laufenden watch warten -- und das dauert jetzt bis zu 5,5 Stunden.
   # Geplante Laeufe setzen keine Inputs, landen also in "untisbot-watch".
   group: untisbot-${{ github.event.inputs.modus || 'watch' }}
   # Niemals abbrechen: Ein laufender Check darf nicht mitten im Versand
@@ -55,7 +71,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    # Der harte Deckel von GitHub liegt bei 6 Stunden. Der Lauf selbst ist
+    # auf 5,5 Stunden ausgelegt, dazwischen bleibt Luft fuer Installation
+    # und Aufraeumen.
+    timeout-minutes: 355
 
     steps:
       - uses: actions/checkout@v4
@@ -86,9 +105,18 @@ jobs:
           else
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            python bot.py watch --minutes "${{ github.event.inputs.minuten || '55' }}"
+            python bot.py watch \
+            --minutes "${{ github.event.inputs.minuten || '330' }}" \
+            --interval 300 \
+            --night-interval 1800
           fi
 
 # Hinweis: GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein
-# Commit im Repo passiert -- etwa ueber die Sommerferien. Danach einmal im
-# Actions-Tab "Enable workflow" klicken.
+# Commit im Repo passiert -- etwa ueber die Sommerferien. Da der Bot seinen
+# Zustand selbst committet, tritt das im laufenden Betrieb nicht ein. Nach
+# einer langen Pause einmal im Actions-Tab "Enable workflow" klicken.
+#
+# In der Lauf-Liste tauchen regelmaessig abgebrochene ("cancelled") Eintraege
+# auf. Das ist kein Fehler: Es sind die wartenden Laeufe, die von einem
+# neueren wartenden ersetzt wurden -- genau das Verhalten, auf dem die Kette
+# beruht.

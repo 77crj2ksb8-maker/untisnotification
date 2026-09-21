@@ -54,7 +54,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -599,6 +599,34 @@ class Untis:
 #  Vergleich  (rein)
 # ===========================================================================
 
+#: Schulzeit in Ortszeit: werktags von 6 bis 19 Uhr. Ausserhalb davon
+#: aendert sich ein Stundenplan praktisch nie -- eine Aenderung um 3 Uhr
+#: nachts gibt es nicht, und was am Sonntagabend eingetragen wird, ist
+#: montags frueh immer noch aktuell.
+SCHOOL_FROM_HOUR = 6
+SCHOOL_TO_HOUR = 19
+
+
+def is_school_time(now: dt.datetime) -> bool:
+    """Werktags zwischen 6 und 19 Uhr Ortszeit."""
+    return now.weekday() < 5 and SCHOOL_FROM_HOUR <= now.hour < SCHOOL_TO_HOUR
+
+
+def interval_for(now: dt.datetime, busy: int, idle: int) -> int:
+    """Abfragetakt je nach Tageszeit: kurz in der Schulzeit, sonst lang.
+
+    Der Bot laeuft rund um die Uhr, aber nachts und am Wochenende im
+    Fuenfminutentakt zu fragen waere sinnlose Last -- fuer den Schulserver
+    wie fuer uns. Jede Abfrage ist eine vollstaendige WebUntis-Anmeldung;
+    im Dauerbetrieb waeren das knapp 300 pro Tag statt gut 100.
+
+    Verpasst wird dabei nichts: Wird um 2 Uhr nachts etwas eingetragen,
+    steht die Meldung spaetestens eine halbe Stunde spaeter im Chat --
+    lange bevor sie jemanden interessiert.
+    """
+    return busy if is_school_time(now) else idle
+
+
 def chronological(lesson: Lesson) -> tuple[str, str, str]:
     """Sortierschluessel fuer Stunden: Tag, Uhrzeit, fachlicher Schluessel.
 
@@ -1116,7 +1144,7 @@ def render(changes: Sequence[Change], today: dt.date,
         return ""
 
     if len(changes) >= BULK_THRESHOLD:
-        return render_summary(changes, today, bulk_note)
+        return render_summary(changes, bulk_note)
 
     lines = [f"<b>{esc(header)}</b>"]
     if bulk_note:
@@ -1140,8 +1168,7 @@ def render(changes: Sequence[Change], today: dt.date,
     return "\n".join(lines)
 
 
-def render_summary(changes: Sequence[Change], today: dt.date,
-                   bulk_note: str = "") -> str:
+def render_summary(changes: Sequence[Change], bulk_note: str = "") -> str:
     """Kurzfassung bei sehr vielen Aenderungen.
 
     Zaehlt nach Art und nennt die betroffenen Tage, statt fuenfzig Zeilen
@@ -1156,7 +1183,8 @@ def render_summary(changes: Sequence[Change], today: dt.date,
     if bulk_note:
         lines.append(f"<i>{esc(bulk_note)}</i>")
     lines.append("")
-    lines.append(f"<b>{len(changes)} Änderungen</b> an "
+    lines.append(f"<b>{len(changes)} "
+                 f"Änderung{'en' if len(changes) != 1 else ''}</b> an "
                  f"{len(days)} Tag{'en' if len(days) != 1 else ''}:")
 
     for kind in KINDS:
@@ -1453,6 +1481,27 @@ def parse_pending(raw: str) -> tuple[str, int]:
         return mark, 1 if mark else 0
 
 
+def confirm_or_hold(pending: str, mark: str) -> tuple[bool, str, int]:
+    """Entscheidet, ob eine ungewoehnliche Datenlage als echt gilt.
+
+    Liefert (bestaetigt, neuer_pending_Eintrag, Sichtung).
+
+    Der Zaehler laeuft ueber JEDE ungewoehnliche Lage weiter, auch wenn
+    sich die Daten dabei aendern. Wuerde er bei jedem Wechsel zurueck-
+    gesetzt, koennte der Bot bei schwankenden Teilantworten unbegrenzt
+    still bleiben -- ohne dass es jemand bemerkt.
+
+    Zwei Wege zur Bestaetigung:
+      * zweimal exakt dieselbe Lage  -> eindeutig kein Aussetzer
+      * oder anhaltend ungewoehnlich -> nach PENDING_LIMIT Sichtungen ist
+        auch schwankender Unsinn kein Schluckauf mehr
+    """
+    letzter, sichtung = parse_pending(pending)
+    sichtung += 1
+    bestaetigt = (letzter == mark and sichtung >= 2) or sichtung >= PENDING_LIMIT
+    return bestaetigt, f"{mark}:{sichtung}", sichtung
+
+
 def fingerprint(lessons: Sequence[Lesson]) -> str:
     """Kurzer, stabiler Fingerabdruck einer Stundenliste."""
     import hashlib
@@ -1592,7 +1641,9 @@ def save_state(lessons: Sequence[Lesson], win: tuple[dt.date, dt.date],
 # ===========================================================================
 
 def git(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=BASE_DIR,
+    # check=False ausdruecklich: Der Rueckgabewert wird ueberall selbst
+    # ausgewertet, ein Fehlschlag ist hier nie eine Ausnahme wert.
+    return subprocess.run(["git", *args], cwd=BASE_DIR, check=False,
                           capture_output=True, text=True, timeout=60)
 
 
@@ -1713,34 +1764,23 @@ def check_once(cfg: Config, dry_run: bool = False,
     try:
         check_plausible(previous.lessons, lessons, compare_win)
     except Implausible as exc:
-        mark, seen = parse_pending(previous.pending)
-        now_mark = fingerprint(lessons)
-
-        # Der Zaehler laeuft ueber JEDE ungewoehnliche Lage weiter, auch
-        # wenn sich die Daten dabei aendern. Wuerde er bei jedem Wechsel
-        # zurueckgesetzt, koennte der Bot bei schwankenden Teilantworten
-        # unbegrenzt still bleiben -- ohne dass es jemand bemerkt.
-        seen += 1
-
-        # Zwei Wege zur Bestaetigung:
-        #   * zweimal exakt dieselbe Lage  -> eindeutig kein Aussetzer
-        #   * oder anhaltend ungewoehnlich -> nach einer knappen halben
-        #     Stunde ist auch schwankender Unsinn kein Schluckauf mehr
-        bestaetigt = (mark == now_mark and seen >= 2) or seen >= PENDING_LIMIT
+        bestaetigt, pending_neu, sichtung = confirm_or_hold(
+            previous.pending, fingerprint(lessons))
 
         if not bestaetigt:
             if not dry_run:
                 save_state(previous.lessons, previous.window or win,
-                           state_path, pending=f"{now_mark}:{seen}")
+                           state_path, pending=pending_neu)
                 commit_state(state_path)
             return Result(IDLE, message=f"Ungewoehnliche Lage gemerkt "
-                                        f"({seen}), warte auf Bestaetigung: {exc}")
+                                        f"({sichtung}), warte auf "
+                                        f"Bestaetigung: {exc}")
 
         # Die neue Wahrheit (Halbjahreswechsel, Projektwoche, neuer
         # Kursplan). Ohne diesen Ausweg bliebe der Bot fuer immer stehen
         # und die wichtigste Planaenderung des Jahres kaeme nie an.
         log.warning("Grossflaechige Aenderung bestaetigt (%d. Sichtung): %s",
-                    seen, exc)
+                    sichtung, exc)
         bulk_note = "Der Stundenplan hat sich großflächig geändert."
 
     # -- Erstlauf: nur merken, nicht fluten
@@ -1780,6 +1820,7 @@ def check_once(cfg: Config, dry_run: bool = False,
 
 
 def watch(cfg: Config, minutes: int, interval: int,
+          night_interval: int | None = None,
           sleeper: Callable[[float], None] = time.sleep,
           clock: Callable[[], float] = time.monotonic) -> int:
     """Prueft ueber einen laengeren Zeitraum in festem Takt.
@@ -1787,8 +1828,12 @@ def watch(cfg: Config, minutes: int, interval: int,
     Der Grund fuer diese Schleife: GitHubs Zeitplaner haelt kurze
     Intervalle nicht ein -- ein "alle 5 Minuten" wird verzoegert, gebuendelt
     oder ganz verworfen. Statt auf 288 puenktliche Starts pro Tag zu hoffen,
-    braucht es nur noch einen Start pro Stunde; den Takt macht diese
+    braucht es nur noch wenige Starts pro Tag; den Takt macht diese
     Schleife selbst.
+
+    Mit night_interval wird ausserhalb der Schulzeit langsamer gefragt --
+    siehe interval_for(). Ohne den Wert bleibt der Takt konstant, genau
+    wie zuvor.
 
     Rueckgabewert ist der Exit-Code: 0 = in Ordnung, 1 = Eingriff noetig.
     """
@@ -1832,11 +1877,14 @@ def watch(cfg: Config, minutes: int, interval: int,
                   file=sys.stderr)
             return 1
 
+        takt = (interval if night_interval is None else
+                interval_for(now_local(cfg.timezone), interval, night_interval))
+
         remaining = deadline - clock()
-        if remaining < interval:
+        if remaining < takt:
             break
         # Die eigene Laufzeit abziehen, damit der Takt nicht wegdriftet.
-        sleeper(max(0.0, interval - (clock() - started)))
+        sleeper(max(0.0, takt - (clock() - started)))
 
     print(f"Fertig: {run} Durchlaeufe.")
     return 0
@@ -2065,7 +2113,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_watch = sub.add_parser("watch", help="laenger pruefen, in festem Takt")
     p_watch.add_argument("--minutes", type=int, default=55)
     p_watch.add_argument("--interval", type=int, default=300,
-                         help="Sekunden zwischen zwei Pruefungen")
+                         help="Sekunden zwischen zwei Pruefungen (Schulzeit)")
+    p_watch.add_argument("--night-interval", type=int, default=None,
+                         help="Sekunden zwischen zwei Pruefungen ausserhalb "
+                              "der Schulzeit; ohne Angabe gilt --interval")
 
     sub.add_parser("selftest", help="Zugangsdaten einzeln pruefen")
     sub.add_parser("testmessage", help="Beispielnachricht im aktuellen Format senden")
@@ -2095,7 +2146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "show":
         return show(cfg, args.days)
     if command == "watch":
-        return watch(cfg, args.minutes, args.interval)
+        return watch(cfg, args.minutes, args.interval, args.night_interval)
 
     result = check_once(cfg, dry_run=args.dry_run)
     print(result.message or result.status)
