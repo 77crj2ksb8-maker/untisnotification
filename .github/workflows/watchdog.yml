@@ -53,10 +53,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Neuester Lauf, unabhaengig vom Status: Ein gerade laufender ist
-          # das beste Lebenszeichen, das es gibt.
+          # Neuester GEPLANTER Lauf, unabhaengig vom Status: Ein gerade
+          # laufender ist das beste Lebenszeichen, das es gibt.
+          #
+          # event=schedule ist wichtig. Ohne den Filter zaehlte auch ein von
+          # Hand gestarteter testmessage- oder selftest-Lauf als Lebenszeichen
+          # -- der dauert eine Minute und haelt die Kette gerade nicht am
+          # Leben. Genau am Tag, an dem jemand nach einem Aussetzer eine
+          # Testnachricht schickt, schwiege der Wachhund.
+          #
+          # Umgekehrt entsteht kein Fehlalarm: Die Kette lebt nur, solange der
+          # Zeitplaner ausloest. Tut er es 8 Stunden lang nicht, steht kein
+          # Nachfolger bereit und die Kette endet mit dem laufenden Lauf --
+          # dann ist die Meldung richtig.
           letzter=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/check-timetable.yml/runs?per_page=1" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/check-timetable.yml/runs?event=schedule&per_page=1" \
             --jq '.workflow_runs[0].run_started_at // empty')
 
           if [ -z "$letzter" ]; then
@@ -72,7 +83,7 @@ jobs:
           # bevor von einem echten Stillstand auszugehen ist.
           if [ "$alter" -gt 480 ]; then
             # Der Hinweis gehoert in die Meldung selbst. Wer sie abends auf
-            # dem Handy liest, hat weder README noch SETUP zur Hand -- und
+            # dem Handy liest, hat das README nicht zur Hand -- und
             # ohne Handstart wartet die Kette darauf, dass der Zeitplaner
             # sich von selbst erbarmt.
             #

@@ -2,6 +2,73 @@
 
 Das Format folgt lose [Keep a Changelog](https://keepachangelog.com/de/).
 
+## 2.7.0 — 2026-09-21
+
+Aufräumen: vierzehn Dateien auf elf, dazu zwei Fehler in den Workflows und
+einer in `split()`, gefunden bei der Durchsicht danach.
+
+### Behoben
+
+* **Ein gescheitertes `git fetch` blieb folgenlos.** Der Schritt „Auf den
+  aktuellen Stand bringen" lief ohne `set -e`; der Rückgabewert war also der
+  des abschließenden `echo`. Fällt das Netz während des Fetch aus, liefe der
+  Job stillschweigend auf dem veralteten Checkout weiter — und meldete genau
+  die Dopplungen, gegen die dieser Schritt überhaupt eingebaut wurde. Jetzt
+  scheitert er laut, und die Störmeldung greift.
+
+* **Der Wachhund zählte eine Testnachricht als Lebenszeichen.** Er fragte den
+  *neuesten* Lauf des Bot-Workflows ab, unabhängig vom Auslöser. Ein von Hand
+  gestarteter `testmessage`- oder `selftest`-Lauf dauert eine Minute und hält
+  die Kette gerade **nicht** am Leben — ausgerechnet am Tag, an dem jemand
+  nach einem Aussetzer eine Testnachricht schickt, hätte der Wachhund
+  geschwiegen. Die Abfrage filtert jetzt auf `event=schedule`.
+
+* **`split()` zerriss im Notfallzweig doch ein Tag.** Passen die
+  schließenden Tags nicht mehr ins Limit, schnitt die Funktion hart auf
+  `line[:limit]` — ohne Rücksicht auf Tags und Entitäten:
+
+  ```
+  vorher:  ['<b>x<i>y</i', '>z</b>ww']
+  nachher: ['<b>x<i>y',    '</i>z</b>ww']
+  ```
+
+  Das zweite Stück begann mit einem nackten `>`, das Telegram als Text
+  anzeigt. Der Zweig greift, wenn zwischen Schnittpunkt und Limit ein Tag
+  zugeht: Die Rücklage wird aus `line[:limit]` berechnet, der Stapel aber am
+  Schnittpunkt — und der ist dann tiefer.
+
+  Gefunden mit einer Eigenschaftssuche über 100.000 zufällige Nachrichten.
+  **Bei `SPLIT_AT = 3500` trat der Fall nie ein** (0 von 40.000 bei Grenzen
+  von 500 bis 4000), der alte Kommentar hatte insofern recht. Bei kleineren
+  Grenzen schlug er zuverlässig zu — eine Mine für den Tag, an dem jemand
+  das Limit senkt. Mutationsgeprüft.
+
+### Geändert
+
+* **Vierzehn Dateien auf elf.** `SETUP.md`, `COPYRIGHT` und `.env.example`
+  sind im README aufgegangen: Sie sprachen denselben Leser zur selben Zeit an,
+  und die `.env`-Vorlage wiederholte nur die Einstellungstabelle. Die
+  Nutzungsrechte stehen jetzt als Abschnitt dort, wo sie auch gelesen werden.
+
+  Nicht zusammengelegt wurden die drei Workflows, und zwar aus Gründen, nicht
+  aus Bequemlichkeit: Der **Wachhund** fragt, wann der letzte geplante Lauf
+  des Bot-Workflows begann — in derselben Datei zählte er seine eigenen Läufe
+  als Lebenszeichen. Die **Tests** hingen dort an der workflow-weiten
+  `concurrency` der Laufkette; ein Push müsste bis zu 5,5 Stunden auf seine
+  Prüfung warten. `.gitignore` kann ebenfalls nicht weg: Eine ignorierte
+  `.gitignore` ignoriert nichts, und sie ist der einzige Schutz davor, dass
+  eine `.env` im öffentlichen Repo landet.
+
+* **Der Klassenplan-Rückfall hat jetzt Tests.** `_by_klasse` war die einzige
+  Funktion ohne jede Abdeckung — und sie greift ausschließlich dann, wenn der
+  persönliche Stundenplan schon klemmt. Ein Fehler darin wäre genau in dem
+  Moment aufgefallen, in dem man ihn am wenigsten gebrauchen kann. Fünf neue
+  Tests, darunter zwei für die Verdrahtung: Ein **leerer** persönlicher Plan
+  darf den Klassenplan nicht auslösen, sonst verschickte der Bot bei einem
+  stillen Ausfall den Plan der ganzen Klasse als Massen-Änderung.
+
+* 463 → 469 Tests.
+
 ## 2.6.0 — 2026-09-21
 
 Ergebnis der zweiten Prüfrunde: zwei Auditoren, zwei Developer. Kein neues

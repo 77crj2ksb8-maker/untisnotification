@@ -102,6 +102,13 @@ jobs:
       # SHA ist also je Lauf eingefroren.
       - name: Auf den aktuellen Stand bringen
         run: |
+          # set -e ist hier nicht Kosmetik: Ohne ihn ist der Rueckgabewert
+          # des Schritts der des letzten Befehls -- also des echo. Ein
+          # gescheitertes git fetch (Netz weg, Rechte weg) bliebe damit
+          # unbemerkt, der Lauf liefe auf dem veralteten Checkout weiter
+          # und meldete genau die Dopplungen, die dieser Schritt verhindern
+          # soll. Lieber laut scheitern: Dann greift "Stoerung melden".
+          set -euo pipefail
           git fetch --quiet origin "${{ github.ref_name }}"
           git reset --quiet --hard "origin/${{ github.ref_name }}"
           echo "Stand: $(git rev-parse --short HEAD)"

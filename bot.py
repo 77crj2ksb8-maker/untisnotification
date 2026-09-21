@@ -57,7 +57,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -1347,10 +1347,20 @@ def _split_long_line(line: str, limit: int) -> tuple[str, str]:
     DIESEN Teil als Klartext hinterher. Die Nachricht kommt an, sieht aber
     in der Mitte anders aus als aussen herum.
 
-    Notfallausweg ist der harte Schnitt von frueher: Er greift nur, wenn
-    die schliessenden Tags selbst nicht mehr ins Limit passen -- bei der
-    Verschachtelungstiefe dieser Nachrichten (nie mehr als eine) kommt das
-    nicht vor.
+    Notfallausweg ist ein Schnitt ohne die rettenden Tags. Er greift nur,
+    wenn die schliessenden Tags selbst nicht mehr ins Limit passen -- bei
+    der Verschachtelungstiefe dieser Nachrichten (nie mehr als eine) kommt
+    das nicht vor. Gemessen: bei limit 500 bis 4000 in 40.000 zufaelligen
+    Nachrichten kein einziges Mal, SPLIT_AT ist 3500.
+
+    Frueher war dieser Ausweg ein harter Schnitt auf line[:limit] -- und
+    der zerschnitt ausgerechnet das, wogegen diese Funktion antritt: Tags
+    und Entitaeten. Das Stueck endete auf "<i" und das naechste begann mit
+    "ndex>", das Telegram dann als sichtbaren Text zeigte. Jetzt wird auch
+    im Notfall nur an einer unverfaenglichen Stelle geschnitten. Die
+    Auszeichnung bleibt dabei unausgeglichen -- Telegram lehnt das Stueck
+    ab und _send_chunk schickt es als Klartext, was sichtbar, aber heil
+    ist. Ein zerrissenes Tag verdirbt dagegen zwei Stuecke.
     """
     reserve = sum(len(tag) + 3 for tag in _open_tags(line[:limit]))
     pos = _cut_point(line, max(1, limit - reserve))
@@ -1361,7 +1371,13 @@ def _split_long_line(line: str, limit: int) -> tuple[str, str]:
     # pos > len(auf) sichert den Fortschritt: Der Rest muss kuerzer werden,
     # sonst dreht sich die Schleife in split() ewig.
     if pos <= len(auf) or pos + len(zu) > limit:
-        return line[:limit], line[limit:]
+        # "or limit" ist kein Schoenheitsfehler, sondern die Abbruchgarantie:
+        # Beginnt die Zeile mit einem Tag, das allein schon laenger ist als
+        # das Limit, liefert _cut_point 0 -- und ein Schnitt bei 0 liesse
+        # die Schleife in split() ewig laufen. Dann gilt Fortschritt vor
+        # Formatierung.
+        hart = _cut_point(line, limit) or limit
+        return line[:hart], line[hart:]
     return line[:pos] + zu, auf + line[pos:]
 
 
@@ -2151,8 +2167,9 @@ def selftest(cfg: Config) -> int:
             ok = False
 
     # Der Benutzername maskiert: In Actions maskiert GitHub nur registrierte
-    # Secrets, lokal maskiert niemand -- und SETUP schickt Leute genau dorthin,
-    # um eine Diagnoseausgabe zu erzeugen, die man dann gern weiterreicht.
+    # Secrets, lokal maskiert niemand -- und das README schickt Leute bei
+    # Problemen genau dorthin, um eine Diagnoseausgabe zu erzeugen, die man
+    # dann gern weiterreicht.
     # Zum Erkennen des richtigen Kontos reichen Anfang und Ende.
     print(f"WebUntis         {cfg.untis_server} / {cfg.untis_school} "
           f"/ {mask(cfg.untis_user)}")

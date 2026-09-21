@@ -324,10 +324,11 @@ def test_dotenv_ignoriert_kommentare_und_muell(tmp_path, monkeypatch):
 
 
 def test_dotenv_ignoriert_auskommentierte_zuweisung(tmp_path):
-    """Genau die Form, die .env.example liefert -- und SETUP sagt, man soll
-    die Datei kopieren. Anders als "# Kommentar" enthaelt "#LOOKAHEAD_DAYS=7"
-    ein "=", faellt also nicht in den Muell-Zweig: Nur die Kommentarpruefung
-    haelt sie auf. Ohne sie legte jeder Kopierer Variablen wie
+    """Genau die Form, die die .env-Vorlage im README liefert -- die
+    optionalen Zeilen stehen dort auskommentiert, mitsamt ihrem Standardwert.
+    Anders als "# Kommentar" enthaelt "#LOOKAHEAD_DAYS=7" ein "=", faellt
+    also nicht in den Muell-Zweig: Nur die Kommentarpruefung haelt sie auf.
+    Ohne sie legte jeder, der die Vorlage kopiert, Variablen wie
     "#LOOKAHEAD_DAYS" in seiner Umgebung an.
 
     Mutationstest: startswith("#") aus _load_dotenv entfernen -> dieser
@@ -1794,6 +1795,33 @@ def test_split_zerreisst_die_auszeichnung_nicht():
     assert all(ist_ausgeglichen(t) for t in teile)
 
 
+def test_split_notfallschnitt_zerreisst_trotzdem_kein_tag():
+    """Der Notfallzweig von _split_long_line greift, wenn die
+    schliessenden Tags nicht mehr ins Limit passen -- konkret dann, wenn
+    zwischen Schnittpunkt und Limit ein Tag zugeht: Die Ruecklage wird aus
+    line[:limit] berechnet, der Stapel aber am Schnittpunkt, und der ist
+    dann tiefer als die Ruecklage annimmt.
+
+    Frueher schnitt dieser Zweig hart auf line[:limit] und zerriss dabei
+    genau das, wogegen die Funktion antritt:
+
+        ['<b>x<i>y</i', '>z</b>ww']
+
+    Das zweite Stueck beginnt mit einem nackten ">", das Telegram als Text
+    zeigt. Heute wird auch im Notfall nur an unverfaenglicher Stelle
+    geschnitten. Dass das erste Stueck unausgeglichen bleibt, ist der
+    Preis: Telegram lehnt es ab, _send_chunk schickt es als Klartext --
+    sichtbar, aber heil. Ein zerrissenes Tag verdirbt zwei Stuecke.
+
+    Mutationstest: in _split_long_line "hart = _cut_point(line, limit) or
+    limit" durch "hart = limit" ersetzen -> dieser Test muss rot werden.
+    """
+    teile = bot.split("<b>x<i>y</i>z</b>ww", limit=11)
+    assert teile == ["<b>x<i>y", "</i>z</b>ww"]
+    for teil in teile:
+        assert teil.count("<") == teil.count(">"), f"Tag zerrissen: {teil!r}"
+
+
 def test_split_haelt_das_limit_auch_beim_harten_schnitt():
     text = "    <i>" + "x" * 4000 + "</i>"
     assert all(len(t) <= 500 for t in bot.split(text, limit=500))
@@ -3204,6 +3232,101 @@ def test_schoolyears_fehler_gibt_leere_liste(cfg):
     assert untis_mit(cfg, Bockig()).schoolyears() == []
 
 
+class FakeKlasse:
+    def __init__(self, name):
+        self.name = name
+
+
+def klassen_session(namen, geholt):
+    """FakeSession, die Klassen kennt und den Abruf protokolliert."""
+
+    class Sitzung(FakeSession):
+        def klassen(self):
+            return [FakeKlasse(n) for n in namen]
+
+        def timetable(self, klasse, start, end):
+            geholt.append((klasse.name, start, end))
+            return ["stunde"]
+
+        def my_timetable(self, start, end):
+            raise RuntimeError("persoenlicher Plan gesperrt")
+
+    return Sitzung()
+
+
+def test_by_klasse_findet_die_klasse():
+    """Der Rueckfall auf den Klassenplan greift nur, wenn der persoenliche
+    Plan gar nicht abrufbar ist -- also genau dann, wenn ohnehin schon
+    etwas klemmt. Ungeprueft faellt ein Fehler darin erst in dem Moment
+    auf, in dem man ihn am wenigsten gebrauchen kann.
+    """
+    geholt = []
+    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
+                 untis_server="s", untis_school="k", untis_user="u",
+                 untis_password="p", untis_klasse="3WGI13")
+    u = untis_mit(cfg, klassen_session(["1A", "3WGI13", "2B"], geholt))
+    spanne = (dt.date(2026, 9, 14), dt.date(2026, 9, 21))
+
+    assert list(u._by_klasse(*spanne)) == ["stunde"]
+    assert geholt == [("3WGI13", *spanne)]
+
+
+def test_by_klasse_ignoriert_gross_und_kleinschreibung():
+    """WEBUNTIS_KLASSE tippt ein Mensch in ein Secret-Feld ab. "3wgi13"
+    darf nicht an der Schreibweise scheitern."""
+    geholt = []
+    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
+                 untis_server="s", untis_school="k", untis_user="u",
+                 untis_password="p", untis_klasse="3wgi13")
+    u = untis_mit(cfg, klassen_session(["3WGI13"], geholt))
+    u._by_klasse(dt.date(2026, 9, 14), dt.date(2026, 9, 21))
+    assert [n for n, _s, _e in geholt] == ["3WGI13"]
+
+
+def test_by_klasse_nennt_die_vorhandenen_klassen():
+    """Ein Tippfehler im Secret ist der wahrscheinlichste Fehler hier.
+    "Klasse unbekannt" allein zwingt zum Raten -- die Liste beantwortet
+    die Frage sofort."""
+    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
+                 untis_server="s", untis_school="k", untis_user="u",
+                 untis_password="p", untis_klasse="3WGI31")
+    u = untis_mit(cfg, klassen_session(["1A", "3WGI13"], []))
+    with pytest.raises(bot.UntisError, match="3WGI13"):
+        u._by_klasse(dt.date(2026, 9, 14), dt.date(2026, 9, 21))
+
+
+def test_timetable_faellt_auf_den_klassenplan_zurueck():
+    """Die Verdrahtung, nicht nur der Baustein: Erst wenn my_timetable
+    WIRFT, wird der Klassenplan geholt. Ein LEERER persoenlicher Plan darf
+    ihn nicht ausloesen -- sonst verschickte der Bot bei einem stillen
+    Ausfall den Plan der ganzen Klasse als Massen-Aenderung."""
+    geholt = []
+    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
+                 untis_server="s", untis_school="k", untis_user="u",
+                 untis_password="p", untis_klasse="3WGI13")
+
+    u = untis_mit(cfg, klassen_session(["3WGI13"], geholt))
+    u._convert = lambda periods, _resolve: [lesson(uid=1)]
+    u._resolver = lambda: (lambda _art, _ids: ())
+    assert len(u.timetable(dt.date(2026, 9, 14), dt.date(2026, 9, 21))) == 1
+    assert [n for n, _s, _e in geholt] == ["3WGI13"]
+
+
+def test_timetable_leerer_persoenlicher_plan_holt_nicht_die_klasse():
+    geholt = []
+    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
+                 untis_server="s", untis_school="k", untis_user="u",
+                 untis_password="p", untis_klasse="3WGI13")
+
+    sitzung = klassen_session(["3WGI13"], geholt)
+    sitzung.my_timetable = lambda start, end: []
+    u = untis_mit(cfg, sitzung)
+    u._resolver = lambda: (lambda _art, _ids: ())
+    with pytest.raises(bot.NothingToDo):
+        u.timetable(dt.date(2026, 9, 14), dt.date(2026, 9, 21))
+    assert geholt == [], "der Klassenplan darf hier nicht geholt werden"
+
+
 def test_clamp_ohne_schuljahre_unveraendert(cfg):
     u = untis_mit(cfg, FakeSession())
     fenster = (dt.date(2026, 9, 14), dt.date(2026, 9, 21))
@@ -3520,8 +3643,9 @@ def test_selftest_meldet_kaputten_token(cfg, monkeypatch, capsys):
 def test_selftest_zeigt_den_benutzernamen_nicht_im_klartext(cfg, monkeypatch,
                                                            capsys):
     """SICHERHEITSNETZ: In Actions maskiert GitHub registrierte Secrets,
-    lokal maskiert niemand -- und SETUP schickt Leute genau dorthin, um eine
-    Diagnoseausgabe zu erzeugen, die man dann weiterreicht."""
+    lokal maskiert niemand -- und das README schickt Leute bei Problemen
+    genau dorthin, um eine Diagnoseausgabe zu erzeugen, die man dann
+    weiterreicht."""
     geheim = dataclasses.replace(cfg, untis_user="max.mustermann.2026")
     monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {"username": "bot"})
     monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()]))

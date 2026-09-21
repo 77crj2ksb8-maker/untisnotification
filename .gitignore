@@ -1,16 +1,18 @@
-# Zugangsdaten -- duerfen nie ins Repo, das oeffentlich ist.
+# Zugangsdaten. Diese Datei MUSS versioniert sein, damit die Regel bei
+# jedem wirkt, der das Repo klont -- eine ignorierte .gitignore ignoriert
+# nichts. Das Repo ist oeffentlich, ein versehentlich committetes .env
+# waere nicht rueckholbar.
 .env
 
-# state.json steht hier bewusst drin: lokal soll ein Testlauf den
-# Zustand nicht versehentlich mitcommitten. In der Cloud ist genau das
-# der Sinn -- deshalb nutzt commit_state() dort "git add -f".
-# Bereits versionierte Dateien bleiben davon unberuehrt, die auf GitHub
+# Lokal soll ein Testlauf den Zustand nicht mitcommitten. In der Cloud ist
+# genau das der Sinn -- deshalb nutzt commit_state() dort "git add -f".
+# Bereits versionierte Dateien bleiben unberuehrt, die auf GitHub
 # gepflegte state.json bleibt also getrackt.
 state.json
 state.broken
 state.json.*.tmp
 
-# Python-Kram
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
