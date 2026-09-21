@@ -160,6 +160,13 @@ zu Stunden, die er nicht hat — und verpasst seine eigenen. Für identische
 Stundenpläne ist das der mit Abstand einfachste Weg, sonst richtet jeder
 besser sein eigenes Repo ein.
 
+## Du wirst benachrichtigt, wenn etwas schiefgeht
+
+Sobald die Secrets gesetzt sind, meldet sich der Bot von selbst per Telegram —
+wenn ein Lauf scheitert, und wenn die Laufkette länger als 8 Stunden
+stillsteht. Du musst dafür nichts einrichten. Einzelheiten im
+[README](README.md#wenn-etwas-schiefgeht).
+
 ## Wenn etwas klemmt
 
 | Meldung | Ursache |

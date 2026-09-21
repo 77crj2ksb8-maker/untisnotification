@@ -109,6 +109,28 @@ jobs:
             --minutes "${{ github.event.inputs.minuten || '330' }}" \
             --interval 300 \
             --night-interval 1800
+
+      # Meldet sich selbst, statt darauf zu hoffen, dass jemand in den
+      # Actions-Tab schaut. Greift bei allem, was den Lauf scheitern
+      # laesst: abgelehnte Zugangsdaten, drei Fehlschlaege in Folge, eine
+      # uebersehene Ausnahme, ein Timeout.
+      #
+      # Abgebrochene Laeufe loesen das NICHT aus -- "cancelled" ist kein
+      # "failure". Das ist wichtig, denn die Laufkette bricht staendig
+      # wartende Laeufe ab; jeder davon wuerde sonst eine Meldung ausloesen.
+      #
+      # continue-on-error, damit eine misslungene Meldung nicht den
+      # eigentlichen Fehler ueberdeckt.
+      - name: Stoerung melden
+        if: failure()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bot.py alert \
+            "Der Überwachungslauf ist fehlgeschlagen. Bis zur Behebung werden keine Stundenplanänderungen gemeldet." \
+            --quelle "Lauf ${{ github.run_number }} · ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
 
 # Hinweis: GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein

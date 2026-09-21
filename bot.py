@@ -21,6 +21,7 @@ Aufrufe:
     python bot.py watch --minutes 55 55 Minuten lang alle 5 Minuten pruefen
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
+    python bot.py alert "..."        Stoermeldung senden
     python bot.py show               Stundenplan anzeigen (Diagnose)
 """
 
@@ -54,7 +55,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -80,10 +81,15 @@ class Config:
     lookahead_days: int = 7
     timezone: str = "Europe/Berlin"
     @staticmethod
-    def from_env() -> Config:
+    def from_env(telegram_only: bool = False) -> Config:
         """Liest die Konfiguration aus Umgebungsvariablen.
 
         Die einzige Stelle im Programm, die os.environ anfasst.
+
+        Mit telegram_only werden die WebUntis-Werte nicht verlangt: Eine
+        Stoermeldung braucht nur den Telegram-Kanal. Ohne diese Ausnahme
+        koennte der Wachhund nicht melden, dass gar nichts mehr laeuft --
+        ausgerechnet dann, wenn die Meldung am noetigsten ist.
         """
         _load_dotenv(BASE_DIR / ".env")
 
@@ -99,6 +105,10 @@ class Config:
 
         def maybe(name: str, default: str = "") -> str:
             return (os.environ.get(name) or default).strip()
+
+        def untis(name: str) -> str:
+            """Pflicht -- ausser die Stoermeldung braucht nur Telegram."""
+            return "" if telegram_only else need(name)
 
         token = need("TELEGRAM_BOT_TOKEN")
         if ":" not in token:
@@ -121,10 +131,10 @@ class Config:
         return Config(
             telegram_token=token,
             telegram_chats=chats,
-            untis_server=need("WEBUNTIS_SERVER").replace("https://", "").rstrip("/"),
-            untis_school=need("WEBUNTIS_SCHOOL"),
-            untis_user=need("WEBUNTIS_USERNAME"),
-            untis_password=need("WEBUNTIS_PASSWORD"),
+            untis_server=untis("WEBUNTIS_SERVER").replace("https://", "").rstrip("/"),
+            untis_school=untis("WEBUNTIS_SCHOOL"),
+            untis_user=untis("WEBUNTIS_USERNAME"),
+            untis_password=untis("WEBUNTIS_PASSWORD"),
             untis_klasse=maybe("WEBUNTIS_KLASSE"),
             lookahead_days=max(1, min(days, 30)),
             timezone=maybe("TIMEZONE", "Europe/Berlin"),
@@ -2044,6 +2054,39 @@ def testmessage(cfg: Config) -> int:
     return 0
 
 
+def render_alert(text: str, quelle: str = "") -> str:
+    """Baut die Stoermeldung. Rein, damit ihr Text testbar ist."""
+    zeilen = ["<b>⚠️ untisbot: Störung</b>", "", esc(text)]
+    if quelle:
+        zeilen += ["", f"<i>{esc(quelle)}</i>"]
+    return "\n".join(zeilen)
+
+
+def alert(cfg: Config, text: str, quelle: str = "") -> int:
+    """Schickt eine Stoermeldung an alle Chats.
+
+    Gedacht fuer den Workflow: Schlaegt ein Lauf fehl, meldet sich der Bot
+    von selbst, statt darauf zu hoffen, dass jemand in den Actions-Tab
+    schaut.
+
+    Die Grenze ist bauartbedingt: Der Bot kann sich nur ueber den Kanal
+    melden, den er hat. Ist Telegram selbst kaputt, bleibt nur GitHubs
+    eigene Fehlermail -- dagegen hilft kein Code.
+
+    Fasst weder Zustand noch Stundenplan an. Eine Stoermeldung darf den
+    Vergleich des naechsten Laufs nicht verfaelschen.
+    """
+    try:
+        erreicht = send(cfg, render_alert(text, quelle))
+    except TelegramError as exc:
+        print(f"FEHLER: Stoermeldung nicht zustellbar:\n{exc}", file=sys.stderr)
+        return 1
+
+    print(f"Stoermeldung an {erreicht} von {len(cfg.telegram_chats)} "
+          "Chat(s) gesendet.")
+    return 0
+
+
 def show(cfg: Config, days: int | None) -> int:
     """Zeigt den Stundenplan im Klartext."""
     today = now_local(cfg.timezone).date()
@@ -2121,6 +2164,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("selftest", help="Zugangsdaten einzeln pruefen")
     sub.add_parser("testmessage", help="Beispielnachricht im aktuellen Format senden")
 
+    p_alert = sub.add_parser("alert", help="Stoermeldung senden")
+    p_alert.add_argument("text", help="Was ist passiert")
+    p_alert.add_argument("--quelle", default="",
+                         help="Woher die Meldung kommt, etwa der Link zum Lauf")
+
     p_show = sub.add_parser("show", help="Stundenplan anzeigen")
     p_show.add_argument("--days", type=int, default=None)
 
@@ -2131,14 +2179,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     _load_dotenv(BASE_DIR / ".env")
     setup_logging(args.log or os.environ.get("LOG_LEVEL", "INFO"))
 
+    command = args.command or "check"
+
     try:
-        cfg = Config.from_env()
+        # Die Stoermeldung soll auch dann noch rausgehen, wenn die
+        # WebUntis-Zugangsdaten fehlen -- sonst schwiege ausgerechnet der
+        # Wachhund, dessen einzige Aufgabe das Melden ist.
+        cfg = Config.from_env(telegram_only=(command == "alert"))
     except ConfigError as exc:
         print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
         return 1
 
-    command = args.command or "check"
-
+    if command == "alert":
+        return alert(cfg, args.text, args.quelle)
     if command == "selftest":
         return selftest(cfg)
     if command == "testmessage":

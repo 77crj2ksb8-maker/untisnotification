@@ -2845,7 +2845,7 @@ def test_timetable_alle_wege_kaputt(cfg, monkeypatch):
 
 def test_main_konfigurationsfehler_gibt_1(monkeypatch, capsys):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    def kaputt():
+    def kaputt(**_k):
         raise ConfigError("fehlt")
 
     monkeypatch.setattr(Config, "from_env", staticmethod(kaputt))
@@ -2855,7 +2855,7 @@ def test_main_konfigurationsfehler_gibt_1(monkeypatch, capsys):
 
 def test_main_ohne_unterbefehl_ist_check(cfg, monkeypatch, capsys):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "check_once",
                         lambda c, dry_run=False: bot.Result(bot.OK, message="fertig"))
     assert bot.main([]) == 0
@@ -2865,7 +2865,7 @@ def test_main_ohne_unterbefehl_ist_check(cfg, monkeypatch, capsys):
 def test_main_check_dry_run(cfg, monkeypatch):
     gesehen = {}
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
 
 
     def fake_check(_cfg, dry_run=False):
@@ -2880,7 +2880,7 @@ def test_main_check_dry_run(cfg, monkeypatch):
 def test_main_check_ohne_dry_run(cfg, monkeypatch):
     gesehen = {}
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
 
     def fake_check(_cfg, dry_run=False):
         gesehen["dry"] = dry_run
@@ -2893,7 +2893,7 @@ def test_main_check_ohne_dry_run(cfg, monkeypatch):
 
 def test_main_fehlgeschlagener_check_gibt_1(cfg, monkeypatch):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "check_once",
                         lambda c, dry_run=False: bot.Result(bot.FAILED, message="weg"))
     assert bot.main(["check"]) == 1
@@ -2902,7 +2902,7 @@ def test_main_fehlgeschlagener_check_gibt_1(cfg, monkeypatch):
 def test_main_watch_reicht_parameter_durch(cfg, monkeypatch):
     gesehen = {}
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "watch",
                         lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
                                                           night=n) or 0)
@@ -2914,7 +2914,7 @@ def test_main_watch_reicht_parameter_durch(cfg, monkeypatch):
 def test_main_watch_standardwerte(cfg, monkeypatch):
     gesehen = {}
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "watch",
                         lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
                                                           night=n) or 0)
@@ -2924,14 +2924,14 @@ def test_main_watch_standardwerte(cfg, monkeypatch):
 
 def test_main_selftest(cfg, monkeypatch):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "selftest", lambda c: 0)
     assert bot.main(["selftest"]) == 0
 
 
 def test_main_show(cfg, monkeypatch):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "show", lambda c, d: 0 if d == 3 else 1)
     assert bot.main(["show", "--days", "3"]) == 0
 
@@ -3088,8 +3088,111 @@ def test_testmessage_gibt_1_bei_versandfehler(cfg, monkeypatch, capsys):
     assert "nicht zugestellt" in capsys.readouterr().err
 
 
+def test_render_alert_ist_als_stoerung_erkennbar():
+    text = bot.render_alert("WebUntis antwortet nicht")
+    assert "Störung" in text
+    assert "WebUntis antwortet nicht" in text
+
+
+def test_render_alert_mit_quelle():
+    text = bot.render_alert("kaputt", "Lauf 42 · https://example.invalid/x")
+    assert "<i>Lauf 42 · https://example.invalid/x</i>" in text
+
+
+def test_render_alert_ohne_quelle_keine_leere_zeile():
+    assert "<i></i>" not in bot.render_alert("kaputt")
+
+
+def test_render_alert_maskiert_html():
+    """Fehlertexte kommen aus Ausnahmen und koennen alles enthalten."""
+    assert "&lt;b&gt;" in bot.render_alert("kaputt: <b>")
+
+
+def test_alert_sendet(cfg, monkeypatch):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    assert bot.alert(cfg, "WebUntis antwortet nicht") == 0
+    assert len(gesendet) == 1 and "Störung" in gesendet[0]
+
+
+def test_alert_ruehrt_den_zustand_nicht_an(cfg, monkeypatch):
+    """SICHERHEITSNETZ: Eine Stoermeldung darf den Vergleich des naechsten
+    Laufs nicht verfaelschen."""
+    def verboten(*_a, **_k):
+        raise AssertionError("alert darf das nicht anfassen")
+
+    monkeypatch.setattr(bot, "save_state", verboten)
+    monkeypatch.setattr(bot, "load_state", verboten)
+    monkeypatch.setattr(bot, "commit_state", verboten)
+    monkeypatch.setattr(bot, "send", lambda *_a, **_k: 1)
+    assert bot.alert(cfg, "kaputt") == 0
+
+
+def test_alert_gibt_1_wenn_telegram_nicht_erreichbar(cfg, monkeypatch, capsys):
+    def abgelehnt(*_a, **_k):
+        raise TelegramConfigError("Token falsch")
+
+    monkeypatch.setattr(bot, "send", abgelehnt)
+    assert bot.alert(cfg, "kaputt") == 1
+    assert "nicht zustellbar" in capsys.readouterr().err
+
+
+def test_config_alert_braucht_kein_webuntis(env):
+    """Der Wachhund meldet, dass nichts mehr laeuft -- er darf nicht selbst
+    an fehlenden WebUntis-Werten scheitern."""
+    for name in ("WEBUNTIS_SERVER", "WEBUNTIS_SCHOOL",
+                 "WEBUNTIS_USERNAME", "WEBUNTIS_PASSWORD"):
+        env.delenv(name)
+    cfg = Config.from_env(telegram_only=True)
+    assert cfg.telegram_chats == ("42",)
+    assert cfg.untis_server == ""
+
+
+def test_config_verlangt_webuntis_sonst_weiterhin(env):
+    env.delenv("WEBUNTIS_PASSWORD")
+    with pytest.raises(ConfigError, match="WEBUNTIS_PASSWORD"):
+        Config.from_env()
+
+
+def test_main_alert(cfg, monkeypatch):
+    gesehen = {}
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
+    monkeypatch.setattr(bot, "alert",
+                        lambda c, text, quelle: gesehen.update(text=text,
+                                                               quelle=quelle) or 0)
+    assert bot.main(["alert", "Lauf fehlgeschlagen", "--quelle", "Lauf 7"]) == 0
+    assert gesehen == {"text": "Lauf fehlgeschlagen", "quelle": "Lauf 7"}
+
+
+def test_main_alert_fordert_nur_telegram_an(cfg, monkeypatch):
+    """Der Unterbefehl muss VOR dem Lesen der Konfiguration feststehen."""
+    gesehen = {}
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.setattr(Config, "from_env",
+                        staticmethod(lambda telegram_only=False:
+                                     gesehen.setdefault("nur_telegram",
+                                                        telegram_only) or cfg))
+    monkeypatch.setattr(bot, "alert", lambda *_a, **_k: 0)
+    bot.main(["alert", "kaputt"])
+    assert gesehen["nur_telegram"] is True
+
+
+def test_main_check_fordert_alles_an(cfg, monkeypatch):
+    gesehen = {}
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.setattr(Config, "from_env",
+                        staticmethod(lambda telegram_only=False:
+                                     gesehen.setdefault("nur_telegram",
+                                                        telegram_only) or cfg))
+    monkeypatch.setattr(bot, "check_once",
+                        lambda _c, dry_run=False: bot.Result(bot.OK))
+    bot.main(["check"])
+    assert gesehen["nur_telegram"] is False
+
+
 def test_main_testmessage(cfg, monkeypatch):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda: cfg))
+    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "testmessage", lambda c: 0)
     assert bot.main(["testmessage"]) == 0

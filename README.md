@@ -47,6 +47,7 @@ Einrichtung im eigenen Repo: **[SETUP.md](SETUP.md)**.
 | `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst |
 | `python bot.py selftest` | jeden Zugang einzeln durchtesten und sagen, was klemmt |
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
+| `python bot.py alert "..."` | Störmeldung senden (`--quelle` für den Link zum Lauf) |
 | `python bot.py show --days 3` | Stundenplan im Klartext anzeigen |
 
 `--log DEBUG` und `--version` gibt es zu jedem Befehl.
@@ -114,6 +115,33 @@ Sein Gedächtnis ist `state.json` im Repo — der Bot committet sie nach jedem
 Durchlauf selbst. Unveränderte Zustände werden nicht neu geschrieben, sonst
 entstünden hunderte Commits pro Tag.
 
+## Wenn etwas schiefgeht
+
+Der Bot meldet sich von selbst — zweistufig, weil ein Job, der nie startet,
+sich auch nicht beschweren kann.
+
+**Ein Lauf scheitert** → der Workflow schickt eine Telegram-Meldung mit Link
+zum fehlgeschlagenen Lauf. Das greift bei abgelehnten Zugangsdaten, drei
+Fehlschlägen in Folge, einer übersehenen Ausnahme und beim Timeout.
+
+**Es läuft gar nichts mehr** → der Wachhund (`watchdog.yml`) sieht alle vier
+Stunden nach, wann der letzte Überwachungslauf begonnen hat. Ist das länger
+als 8 Stunden her, meldet er sich. Genau dieser Fall ist schon eingetreten:
+Die Laufkette stand drei Tage still und fiel nur durch zufälliges Nachsehen
+auf.
+
+Zwei Grenzen, die kein Code beheben kann:
+
+* **Ist Telegram selbst kaputt**, kann der Bot sich nicht über Telegram
+  melden. Dann bleibt nur GitHubs eigene Fehlermail an den Repo-Besitzer.
+* **Löst GitHub gar nichts mehr aus**, schweigt auch der Wachhund — er hängt
+  an derselben Cron-Mechanik. Er fängt den häufigeren Fall ab: Die Kette
+  reißt, während der Rest von GitHub weiterläuft.
+
+Abgebrochene Läufe lösen **keine** Meldung aus. „Cancelled" ist kein
+„failure", und die Laufkette bricht ständig wartende Läufe ab — jeder davon
+würde sonst eine Meldung auslösen.
+
 ## Achtung: `state.json` ist öffentlich lesbar
 
 Das Repo muss public sein (siehe SETUP.md), und der Bot legt seinen Zustand
@@ -133,11 +161,12 @@ gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
 ```
 bot.py                              der ganze Bot
-tests/test_bot.py                   391 Tests, ohne Netz lauffähig
+tests/test_bot.py                   403 Tests, ohne Netz lauffähig
 pyproject.toml                      Einstellungen für pytest und ruff
 requirements.txt                    Abhängigkeiten
 .env.example                        Vorlage für die lokale Entwicklung
 .github/workflows/check-timetable.yml   der Bot-Lauf
+.github/workflows/watchdog.yml      meldet, wenn gar nichts mehr läuft
 .github/workflows/tests.yml         Linter und Tests bei jedem Push
 SETUP.md                            Einrichtung im eigenen Repo
 CHANGELOG.md                        was sich wann geändert hat
@@ -170,7 +199,7 @@ Logging statt Weiterreichen.
 ```bash
 pip install -r requirements.txt
 
-python -m pytest             # 391 Tests, keine Netzverbindung nötig
+python -m pytest             # 403 Tests, keine Netzverbindung nötig
 ruff check .                 # Linter
 ```
 

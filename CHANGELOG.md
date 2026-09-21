@@ -2,6 +2,32 @@
 
 Das Format folgt lose [Keep a Changelog](https://keepachangelog.com/de/).
 
+## 2.3.0 — 2026-09-21
+
+### Neu
+
+* **Störmeldungen.** Der Bot meldet sich von selbst, wenn etwas nicht
+  funktioniert, statt darauf zu hoffen, dass jemand in den Actions-Tab
+  schaut. Zwei Stufen:
+  * Ein fehlgeschlagener Lauf löst über `if: failure()` eine Telegram-Meldung
+    mit Link zum Lauf aus — bei abgelehnten Zugangsdaten, drei Fehlschlägen in
+    Folge, einer übersehenen Ausnahme oder einem Timeout. Abgebrochene Läufe
+    lösen bewusst nichts aus, sonst meldete sich jeder von der Laufkette
+    ersetzte wartende Lauf.
+  * Der neue Workflow `watchdog.yml` sieht alle vier Stunden von außen nach,
+    wann zuletzt ein Überwachungslauf begonnen hat, und meldet einen
+    Stillstand von mehr als 8 Stunden. Das deckt den Fall ab, den sonst
+    niemand melden kann: Es läuft überhaupt nichts mehr.
+* **`bot.py alert "<text>" [--quelle ...]`** als neuer Unterbefehl. Fasst
+  weder Zustand noch Stundenplan an.
+* `Config.from_env(telegram_only=True)` verlangt keine WebUntis-Werte. Sonst
+  könnte der Wachhund nicht melden, dass nichts mehr läuft — ausgerechnet
+  dann, wenn die Meldung am nötigsten ist.
+
+### Sonstiges
+
+* Testsuite: 391 → 403 Tests.
+
 ## 2.2.0 — 2026-09-21
 
 ### Neu

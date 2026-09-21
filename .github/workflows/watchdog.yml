@@ -1,0 +1,79 @@
+name: Wachhund
+
+# Den einen Fall deckt die Stoermeldung im Hauptworkflow NICHT ab: Es laeuft
+# ueberhaupt nichts mehr. Ein Job, der nie startet, kann sich auch nicht
+# beschweren. Genau das ist hier schon passiert -- die Laufkette stand drei
+# Tage still, aufgefallen ist es nur durch zufaelliges Nachsehen.
+#
+# Dieser Workflow schaut deshalb von aussen nach, wann der letzte
+# Ueberwachungslauf begonnen hat, und meldet sich, wenn es zu lange her ist.
+#
+# Die Grenze ist ehrlich zu benennen: Der Wachhund haengt an derselben
+# unzuverlaessigen Cron-Mechanik wie alles andere. Loest GitHub gar nichts
+# mehr aus, schweigt auch er. Er faengt den haeufigeren Fall ab -- die Kette
+# reisst, waehrend der Rest von GitHub weiterlaeuft.
+
+on:
+  schedule:
+    # Alle 4 Stunden zu einer krummen Minute. Volle und halbe Stunden sind
+    # bei GitHub am staerksten ueberbucht und werden am ehesten verworfen.
+    - cron: "37 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read          # noetig, um die Lauf-Historie zu lesen
+
+concurrency:
+  group: untisbot-wachhund
+  cancel-in-progress: false
+
+jobs:
+  nachsehen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Letzten Ueberwachungslauf pruefen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Absichtlich NUR die Telegram-Werte: Eine Stoermeldung braucht
+          # kein WebUntis, siehe Config.from_env(telegram_only=True).
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          # Neuester Lauf, unabhaengig vom Status: Ein gerade laufender ist
+          # das beste Lebenszeichen, das es gibt.
+          letzter=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/check-timetable.yml/runs?per_page=1" \
+            --jq '.workflow_runs[0].run_started_at // empty')
+
+          if [ -z "$letzter" ]; then
+            echo "Noch kein einziger Lauf vorhanden -- nichts zu melden."
+            exit 0
+          fi
+
+          alter=$(( ( $(date -u +%s) - $(date -u -d "$letzter" +%s) ) / 60 ))
+          echo "Letzter Lauf begann $letzter, das sind $alter Minuten her."
+
+          # 8 Stunden. Ein Lauf dauert 5,5 Stunden und der naechste soll
+          # nahtlos uebernehmen; 480 Minuten lassen also reichlich Luft,
+          # bevor von einem echten Stillstand auszugehen ist.
+          if [ "$alter" -gt 480 ]; then
+            python bot.py alert \
+              "Seit $alter Minuten hat kein Überwachungslauf mehr begonnen. Die Laufkette ist abgerissen — Stundenplanänderungen werden gerade nicht gemeldet." \
+              --quelle "Wachhund · $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions"
+          else
+            echo "Alles in Ordnung."
+          fi
