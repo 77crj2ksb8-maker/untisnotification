@@ -166,9 +166,22 @@ Kursgruppen, für jeden lesbar:
  "subjects": ["D(G2)"], "rooms": ["H1.04"], "group": "D(G2)_3WGI13_..."}
 ```
 
+Zwei Dinge, die man dabei leicht übersieht:
+
+* **Die Lehrerkürzel stehen trotzdem drin.** Das Feld `teachers` bleibt leer,
+  weil die Schule Lehrerdaten nicht an Schülerkonten ausliefert — aber in
+  `group` hängen sie hinten dran (`…_3WGI13_1_Ab`), zusammen mit der Klasse.
+  Wer nur auf `teachers` schaut, hält den Plan für anonymer, als er ist.
+* **Die Historie zählt mit.** Jeder Lauf committet die Datei neu. Sie später
+  zu löschen entfernt sie aus dem aktuellen Stand, nicht aus den alten
+  Commits — dafür bräuchte es einen Eingriff in die Historie und ein
+  force-push.
+
 Wer das nicht will, muss den Zustand woanders ablegen (Actions-Cache statt
 Commit) — dann kann er verlorengehen, was ungefährlich ist: Ein Lauf ohne
-gespeicherten Zustand meldet nichts, er merkt sich nur neu.
+gespeicherten Zustand meldet nichts, er merkt sich nur neu. Die Alternative
+ohne diesen Nachteil wäre, `state.json` vor dem Commit zu verschlüsseln; ein
+Secret dafür ist ohnehin schon da.
 
 ## Was wo liegt
 
