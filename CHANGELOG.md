@@ -2,6 +2,67 @@
 
 Das Format folgt lose [Keep a Changelog](https://keepachangelog.com/de/).
 
+## 2.5.0 — 2026-09-21
+
+### Behoben
+
+* **Der Workflow war seit 2.3.0 kaputte Shell.** Beim Einfügen des
+  Meldeschritts rutschte das schließende `fi` des Überwachungsschritts in
+  den neuen Schritt. `bash` wäre vor der ersten Zeile abgebrochen — und die
+  Störmeldung am selben Fehler gestorben, weil sie ebenfalls ein `run`-Block
+  ist. Übrig geblieben wäre nur GitHubs Fehlermail; der Wachhund hätte
+  geschwiegen, weil Läufe ja *starten*.
+
+  Nie ausgeführt worden: Der Stand ging um 12:44 live, und GitHubs
+  Zeitplaner hat seitdem keinen Lauf ausgelöst. Reines Glück.
+
+  Neuer Wächter: `test_workflow_shell_ist_syntaktisch_gueltig` schickt jeden
+  `run`-Block aller Workflows durch `bash -n`. Die damalige Abnahme hatte
+  nur geprüft, dass das YAML parst und der Schritt existiert.
+
+* **Parallelkurse desselben Fachs verschmolzen zu einer falschen Meldung.**
+  Entfällt Sportgruppe A und wechselt Gruppe B nur den Raum, stand dort
+  „❌ 3. Stunde · Sp — entfällt, Raumwechsel". Wer in B ist, wäre zu Hause
+  geblieben. `lesson.group` geht jetzt in den Schlüssel von `build_entries`
+  **und** in den Bucket-Schlüssel von `group_doppelstunden` — sonst hätte
+  die Verkettung Stunde 2 der einen Gruppe an Stunde 1 der anderen gehängt.
+
+* **`split()` zerschnitt überlange Zeilen mitten im HTML-Tag.** Telegram
+  lehnte den Teil ab, der Rückfall schickte ihn als Klartext. Jetzt wird nur
+  an Stellen geschnitten, die weder in einem Tag noch in einer Entität
+  liegen; offene Tags werden geschlossen und im nächsten Teil wieder
+  geöffnet.
+
+* **„Findet doch statt" verschluckte gleichzeitige Änderungen.** Wurde eine
+  Absage zurückgenommen und dabei Raum oder Lehrkraft getauscht, stand nur
+  „findet doch statt". Eine weiterhin abgesagte Stunde mit geänderter
+  Zusatzinfo meldete gar nichts.
+
+* **`_commit_state` committete immer `BASE_DIR/state.json`**, egal welchen
+  Pfad es bekam. Latent, im Produktivpfad identisch.
+
+### Geändert
+
+* **Eine kurze Störung beendet den Lauf nicht mehr.** Statt nach drei
+  Fehlschlägen abzubrechen, verdoppelt sich der Takt je Fehlschlag (gedeckelt
+  bei 15 Minuten), und erst nach sechs Fehlschlägen gibt der Lauf auf. Eine
+  halbstündige WebUntis-Wartung kostet damit drei Fehlversuche statt des
+  ganzen 5,5-Stunden-Platzes. Der Exit-Code 1 bei Dauerausfall bleibt
+  ausdrücklich erhalten — daran hängt die Störmeldung.
+* **`BULK_THRESHOLD` misst jetzt Einträge statt Änderungen.** Die Begründung
+  „Fünfzig Zeilen liest niemand" trifft erst damit zu: Eine Vertretung mit
+  Raumwechsel sind zwei Änderungen, aber eine Zeile.
+* **`bot.py testmessage` nennt jetzt Stundenzahl und Alter des Zustands.**
+  Damit lässt sich „Ferien" von „die Schule hat den Plan abgedreht"
+  unterscheiden — bisher sahen beide von außen gleich aus, und der Bot wäre
+  unbegrenzt grün und still geblieben.
+* `selftest` maskiert den WebUntis-Benutzernamen.
+
+### Sonstiges
+
+* `pyyaml` als Test-Abhängigkeit, damit die Tests die Workflows lesen können.
+* Testsuite: 411 → 460 Tests.
+
 ## 2.4.0 — 2026-09-21
 
 Aus einem Audit-Durchgang. Der erste Punkt behebt einen Fehler, den erst

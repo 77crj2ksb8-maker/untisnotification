@@ -34,6 +34,7 @@ import html
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -56,7 +57,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -813,17 +814,12 @@ def _join(values: Sequence[str]) -> str:
     return ", ".join(values) if values else "—"
 
 
-def compare(old: Lesson, new: Lesson) -> list[Change]:
-    """Vergleicht eine zugeordnete Stunde Feld fuer Feld."""
-    # Ausfall hat Vorrang: Wenn die Stunde entfaellt, interessiert niemanden
-    # mehr, dass sich nebenbei der Raum geaendert hat.
-    if old.status != CANCELLED and new.status == CANCELLED:
-        return [Change("cancelled", new, new.note)]
-    if old.status == CANCELLED and new.status != CANCELLED:
-        return [Change("uncancelled", new, "Der Ausfall wurde zurückgenommen")]
-    if new.status == CANCELLED:
-        return []  # war schon abgesagt, nichts Neues
+def _field_changes(old: Lesson, new: Lesson) -> list[Change]:
+    """Die Aenderungen an Fach, Lehrkraft, Raum und Zeit.
 
+    Eigene Funktion, weil compare() sie an zwei Stellen braucht: beim
+    normalen Vergleich und bei einer zurueckgenommenen Absage.
+    """
     changes: list[Change] = []
     for kind, attr in (("subject", "subjects"),
                        ("teacher", "teachers"),
@@ -841,6 +837,43 @@ def compare(old: Lesson, new: Lesson) -> list[Change]:
     elif (old.start, old.end) != (new.start, new.end):
         changes.append(Change("time", new,
                               f"{old.start}-{old.end} → {new.start}-{new.end}"))
+    return changes
+
+
+def compare(old: Lesson, new: Lesson) -> list[Change]:
+    """Vergleicht eine zugeordnete Stunde Feld fuer Feld."""
+    # Ausfall hat Vorrang: Wenn die Stunde entfaellt, interessiert niemanden
+    # mehr, dass sich nebenbei der Raum geaendert hat.
+    if old.status != CANCELLED and new.status == CANCELLED:
+        return [Change("cancelled", new, new.note)]
+
+    if new.status == CANCELLED:
+        # Weiterhin abgesagt. Die Felder einer abgesagten Stunde sind
+        # niemandem eine Meldung wert -- ein GEAENDERTER Zusatztext schon:
+        # Ueber ihn teilt die Schule mit, was aus der Stunde stattdessen
+        # wird ("findet jetzt doch in R2 statt"). Dieser Zweig gab frueher
+        # pauschal [] zurueck und verschluckte damit genau diese Nachricht.
+        if old.note != new.note:
+            return [Change("note", new, new.note or "(entfernt)")]
+        return []
+
+    if old.status == CANCELLED:
+        # Der Ausfall ist zurueckgenommen -- und damit sind Raum und
+        # Vertretung wieder wichtig. Frueher stand hier nur "findet doch
+        # statt"; wer das las, ging in den alten Raum zur alten Lehrkraft.
+        # Die Ruecknahme bleibt die Leitaenderung (Rang in KINDS), die
+        # Felder haengen sich an.
+        #
+        # Ein WEGGEFALLENER Hinweis wird hier bewusst nicht gemeldet: Der
+        # Text einer abgesagten Stunde ist fast immer die Absagebegruendung
+        # ("Lehrkraft erkrankt"), und dass die hinfaellig ist, sagt schon
+        # "findet doch statt". Ein NEUER Text dagegen ist eine Nachricht.
+        head = Change("uncancelled", new, "Der Ausfall wurde zurückgenommen")
+        if new.note and new.note != old.note:
+            head = dataclasses.replace(head, detail=f"{head.detail} · {new.note}")
+        return [head, *_field_changes(old, new)]
+
+    changes = _field_changes(old, new)
 
     if changes:
         # Der Vertretungstext gehoert an die wichtigste Aenderung, nicht in
@@ -975,9 +1008,15 @@ def relative(date: str, today: dt.date) -> str:
     return {0: "heute", 1: "morgen", 2: "übermorgen"}.get(delta, "")
 
 
-#: Ab so vielen Aenderungen wird zusammengefasst statt aufgelistet.
-#: Eine Nachricht mit 50 Zeilen liest niemand -- die Information "der ganze
-#: Plan ist neu" steckt ohnehin in der Zahl.
+#: Ab so vielen EINTRAEGEN wird zusammengefasst statt aufgelistet. Eine
+#: Nachricht mit 50 Zeilen liest niemand -- die Information "der ganze Plan
+#: ist neu" steckt ohnehin in der Zahl.
+#:
+#: Gezaehlt werden Eintraege, nicht Change-Objekte: Der haeufigste echte
+#: Fall -- Vertretung MIT Raumwechsel -- erzeugt pro Stunde zwei Changes,
+#: die build_entries() danach zu EINER Zeile buendelt. An Changes gemessen
+#: loesten schon 20 betroffene Stunden die Kurzfassung aus, obwohl die
+#: ausfuehrliche Nachricht nur 20 Zeilen gehabt haette.
 BULK_THRESHOLD = 40
 
 #: Wochentag (Python-Zaehlung, Montag=0) -> [(Start, Ende, Stundenname), ...],
@@ -1037,7 +1076,13 @@ def group_doppelstunden(
     buckets: dict[tuple, list[Change]] = {}
     order: list[tuple] = []
     for change in changes:
-        key = (change.lesson.date, change.kind, change.detail, change.lesson.title)
+        # Die Kursgruppe gehoert in den Schluessel, sonst landen zwei
+        # Parallelkurse desselben Fachs (Sportgruppe A und B) im selben
+        # Bucket. Die Verkettung sortiert dort nach Startzeit und wuerde
+        # Stunde 4 der einen Gruppe an Stunde 3 der anderen haengen --
+        # ein Block, den es nie gab.
+        key = (change.lesson.date, change.kind, change.detail,
+               change.lesson.title, change.lesson.group)
         if key not in buckets:
             buckets[key] = []
             order.append(key)
@@ -1145,17 +1190,23 @@ def build_entries(changes: Sequence[Change], periods: Periods) -> list[Entry]:
     und nicht bloss die Stunde: Aenderungen mit unterschiedlicher
     Reichweite bleiben getrennte Eintraege, sonst wuerde die Nachricht
     behaupten, der Raum habe sich in beiden Stunden geaendert.
+
+    Die Kursgruppe gehoert aus demselben Grund in den Schluessel wie das
+    Label: Zwei Parallelkurse desselben Fachs zur selben Stunde --
+    Sportgruppe A entfaellt, Sportgruppe B wechselt nur den Raum -- ergaeben
+    sonst EINEN Eintrag "entfaellt, Raumwechsel". Wer in Gruppe B ist, liest
+    "entfaellt" und bleibt zu Hause.
     """
     blocks: dict[tuple, list[Change]] = {}
-    for group in group_doppelstunden(changes, periods):
-        key = (group[0].lesson.date, block_label(group, periods),
-               group[0].lesson.title)
-        # group[0] vertritt den ganzen Block -- die uebrigen Mitglieder sind
+    for block in group_doppelstunden(changes, periods):
+        key = (block[0].lesson.date, block_label(block, periods),
+               block[0].lesson.title, block[0].lesson.group)
+        # block[0] vertritt den ganzen Block -- die uebrigen Mitglieder sind
         # nach Konstruktion wortgleich, genau das war der Sinn von Stufe 1.
-        blocks.setdefault(key, []).append(group[0])
+        blocks.setdefault(key, []).append(block[0])
 
     entries = []
-    for (date, label, title), members in blocks.items():
+    for (date, label, title, _group), members in blocks.items():
         # Heute redundant -- group_doppelstunden() liefert bereits nach
         # sort_key geordnet, und alle Mitglieder eines Eintrags teilen sich
         # Tag und Blockbeginn, unterscheiden sich also nur im Rang. Die
@@ -1187,7 +1238,10 @@ def render(changes: Sequence[Change], today: dt.date,
     if not changes:
         return ""
 
-    if len(changes) >= BULK_THRESHOLD:
+    # Erst verdichten, dann ueber die Laenge entscheiden: Gemessen wird die
+    # Nachricht, die tatsaechlich entstuende -- siehe BULK_THRESHOLD.
+    entries = build_entries(changes, periods or {})
+    if len(entries) >= BULK_THRESHOLD:
         return render_summary(changes, bulk_note)
 
     lines = [f"<b>{esc(header)}</b>"]
@@ -1195,7 +1249,7 @@ def render(changes: Sequence[Change], today: dt.date,
         lines.append(f"<i>{esc(bulk_note)}</i>")
     current: str | None = None
 
-    for entry in build_entries(changes, periods or {}):
+    for entry in entries:
         if entry.date != current:
             current = entry.date
             rel = relative(current, today)
@@ -1271,12 +1325,71 @@ def render_plan(lessons: Sequence[Lesson], today: dt.date) -> str:
 MAX_LEN = 4096
 SPLIT_AT = 3500
 
+#: Was beim Schneiden nicht auseinandergerissen werden darf: ein Tag und
+#: eine HTML-Entitaet. Mitten durchgeschnitten ergibt beides Zeichen, die
+#: Telegram mit "can't parse entities" ablehnt.
+_UNBREAKABLE = re.compile(r"<[^>]*>|&[#0-9A-Za-z]{1,10};")
+
+_TAG = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
+
+
+def _open_tags(text: str) -> list[str]:
+    """Die am Ende von text noch offenen Tags, von aussen nach innen."""
+    stack: list[str] = []
+    for match in _TAG.finditer(text):
+        if match.group(1):
+            if stack and stack[-1] == match.group(2):
+                stack.pop()
+        else:
+            stack.append(match.group(2))
+    return stack
+
+
+def _cut_point(line: str, budget: int) -> int:
+    """Groesste Position <= budget, die in keinem Tag und keiner Entitaet liegt."""
+    pos = budget
+    for start, end in (m.span() for m in _UNBREAKABLE.finditer(line)):
+        if start < pos < end:
+            return start   # die Bereiche sind disjunkt: einer trifft, dann Schluss
+    return pos
+
+
+def _split_long_line(line: str, limit: int) -> tuple[str, str]:
+    """Zerlegt eine einzelne ueberlange Zeile in (Kopf, Rest).
+
+    Der Kopf schliesst die an der Schnittstelle offenen Tags, der Rest
+    oeffnet sie wieder. Ohne das liefert ein sehr langer substText einen
+    Teil, der "<i>xxx..." beginnt und ohne "</i>" endet -- Telegram lehnt
+    ihn mit "can't parse entities" ab, und _send_chunk schickt AUSGERECHNET
+    DIESEN Teil als Klartext hinterher. Die Nachricht kommt an, sieht aber
+    in der Mitte anders aus als aussen herum.
+
+    Notfallausweg ist der harte Schnitt von frueher: Er greift nur, wenn
+    die schliessenden Tags selbst nicht mehr ins Limit passen -- bei der
+    Verschachtelungstiefe dieser Nachrichten (nie mehr als eine) kommt das
+    nicht vor.
+    """
+    reserve = sum(len(tag) + 3 for tag in _open_tags(line[:limit]))
+    pos = _cut_point(line, max(1, limit - reserve))
+    stack = _open_tags(line[:pos])
+    zu = "".join(f"</{tag}>" for tag in reversed(stack))
+    auf = "".join(f"<{tag}>" for tag in stack)
+
+    # pos > len(auf) sichert den Fortschritt: Der Rest muss kuerzer werden,
+    # sonst dreht sich die Schleife in split() ewig.
+    if pos <= len(auf) or pos + len(zu) > limit:
+        return line[:limit], line[limit:]
+    return line[:pos] + zu, auf + line[pos:]
+
 
 def split(text: str, limit: int = SPLIT_AT) -> list[str]:
     """Teilt lange Nachrichten an Zeilengrenzen.
 
     Telegram bricht ueber 4096 Zeichen ab. An Zeilengrenzen zu teilen haelt
     ausserdem die HTML-Auszeichnung heil -- alle Tags stehen zeilenintern.
+    Passt eine EINZELNE Zeile nicht ins Limit, uebernimmt
+    _split_long_line(); nur dort muss die Auszeichnung von Hand gerettet
+    werden.
     """
     if len(text) <= limit:
         return [text]
@@ -1290,8 +1403,8 @@ def split(text: str, limit: int = SPLIT_AT) -> list[str]:
             if buffer:
                 parts.append("\n".join(buffer))
                 buffer, size = [], 0
-            parts.append(line[:limit])
-            line = line[limit:]
+            kopf, line = _split_long_line(line, limit)
+            parts.append(kopf)
         if size + len(line) + 1 > limit and buffer:
             parts.append("\n".join(buffer))
             buffer, size = [], 0
@@ -1309,8 +1422,6 @@ def strip_html(text: str) -> str:
     Rueckfallebene: Sollte Telegram die Auszeichnung einmal nicht annehmen,
     geht die Meldung trotzdem raus -- lieber ohne Fettschrift als gar nicht.
     """
-    import re
-
     plain = re.sub(r"<[^>]+>", "", text)
     return html.unescape(plain)
 
@@ -1511,8 +1622,15 @@ class State:
 
 
 #: Nach so vielen ungewoehnlichen Durchlaeufen in Folge wird die Lage auch
-#: dann akzeptiert, wenn die Daten dabei schwanken. Bei 5-Minuten-Takt
-#: entspricht das einer knappen halben Stunde.
+#: dann akzeptiert, wenn die Daten dabei schwanken.
+#:
+#: Gezaehlt werden Sichtungen, nicht Minuten -- wie lange das dauert, haengt
+#: also am Takt: im 5-Minuten-Takt der Schulzeit eine knappe halbe Stunde,
+#: im 30-Minuten-Takt der Nacht zweieinhalb Stunden. Das ist vertretbar und
+#: bleibt deshalb so: Ausgesessen wird immer nur eine MELDUNG, nie eine
+#: Aenderung -- und nachts gibt es die ohnehin nicht. Zeitbasiert zu zaehlen
+#: hiesse, einen Zeitstempel im Zustand mitzufuehren und bei jedem
+#: Uhrensprung richtig zu deuten; das waere teurer als das Problem.
 PENDING_LIMIT = 6
 
 
@@ -1619,6 +1737,48 @@ def load_state(path: Path = STATE_FILE) -> State:
                  str(raw.get("pending") or ""))
 
 
+def read_saved_at(path: Path = STATE_FILE) -> str:
+    """Liest NUR den Zeitstempel des gespeicherten Zustands.
+
+    Bewusst nicht ueber load_state(): Das legt eine unlesbare Datei als
+    .broken beiseite, ist also nicht nebenwirkungsfrei. Die Diagnose der
+    Testnachricht darf am Zustand aber wirklich nichts aendern -- auch nicht
+    im Fehlerfall. Hier wird gelesen, sonst nichts.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return ""
+    return str(raw.get("saved_at") or "") if isinstance(raw, dict) else ""
+
+
+def describe_age(saved_at: str, now: dt.datetime) -> str:
+    """Alter eines Zeitstempels in Worten. Rein, damit es testbar ist."""
+    if not saved_at:
+        return "keiner vorhanden"
+    try:
+        gesichert = dt.datetime.fromisoformat(saved_at)
+    except (TypeError, ValueError):
+        return "Zeitstempel unlesbar"
+
+    # Zeitstempel ohne Zone gibt es aus aelteren Dateien und von Systemen
+    # ohne Zoneninfo. Lieber zonenlos weiterrechnen als am Vergleich
+    # scheitern -- auf eine Altersangabe kommt es auf die Stunde nicht an.
+    if gesichert.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    elif now.tzinfo is None:
+        gesichert = gesichert.replace(tzinfo=None)
+
+    minuten = int((now - gesichert).total_seconds() // 60)
+    if minuten < 0:
+        return "in der Zukunft datiert"
+    if minuten < 60:
+        return f"vor {minuten} Minuten gesichert"
+    if minuten < 60 * 48:
+        return f"vor {minuten // 60} Stunden gesichert"
+    return f"vor {minuten // (60 * 24)} Tagen gesichert"
+
+
 def save_state(lessons: Sequence[Lesson], win: tuple[dt.date, dt.date],
                path: Path = STATE_FILE, pending: str = "") -> bool:
     """Speichert den Zustand atomar. Gibt True zurueck, wenn geschrieben wurde.
@@ -1716,8 +1876,13 @@ def _commit_state(path: Path) -> bool:
 
     # -f, weil state.json bewusst in .gitignore steht: lokal soll sie nicht
     # versehentlich mitcommittet werden, in der Cloud ist genau das der Sinn.
+    #
+    # Der ganze Pfad, nicht nur der Dateiname: git laeuft mit cwd=BASE_DIR,
+    # ein blosses "state.json" bezoege sich also immer auf die Datei dort --
+    # geprueft wurde aber der uebergebene Pfad. Im Produktivpfad sind beide
+    # dieselbe Datei, in jedem anderen Aufruf nicht.
     if path.exists():
-        git("add", "-f", str(path.name))
+        git("add", "-f", str(path))
 
     if git("diff", "--staged", "--quiet").returncode != 0:
         commit = git("commit", "-q", "-m", "state: Stundenplan-Zustand [skip ci]")
@@ -1757,6 +1922,40 @@ def _commit_state(path: Path) -> bool:
 # ===========================================================================
 
 OK, FAILED, IDLE = "ok", "failed", "idle"
+
+#: So viele Fehlschlaege in Folge beenden einen watch-Lauf mit Exit 1.
+#:
+#: Frueher standen hier drei. Seit ein Lauf 5,5 Stunden dauert, ist das zu
+#: wenig: Aufgeben kostet nicht diesen einen Durchlauf, sondern den ganzen
+#: Platz in der Laufkette -- und bis die naechste TATSAECHLICHE
+#: Cron-Ausloesung ankommt (gemessen rund 10 von 48), vergehen Stunden. Eine
+#: zwanzigminuetige WebUntis-Wartung kostete so mehr Ueberwachung als die
+#: Wartung selbst. Weiterprobieren heilt sich dagegen von selbst.
+#:
+#: Der Exit 1 bleibt trotzdem erhalten: Er ist es, was den Schritt
+#: "Stoerung melden" im Workflow ausloest (if: failure()). Ohne ihn gaebe es
+#: bei einem echten Dauerausfall gar keine Meldung mehr.
+FAILURE_LIMIT = 6
+
+#: Obergrenze fuer den nach Fehlschlaegen gestreckten Takt. Einen Server,
+#: der ohnehin nicht antwortet, alle fuenf Minuten erneut zu fragen bringt
+#: nichts -- laenger als eine Viertelstunde blind zu bleiben aber auch nicht.
+FAILURE_INTERVAL_MAX = 900
+
+
+def failure_interval(takt: int, failures: int,
+                     cap: int = FAILURE_INTERVAL_MAX) -> int:
+    """Streckt den Abfragetakt nach Fehlschlaegen in Folge.
+
+    Verdoppelt je Fehlschlag bis zur Deckelung. Nie kuerzer als der normale
+    Takt: Ein von Hand gesetztes langes --interval darf durch eine Stoerung
+    nicht ploetzlich beschleunigt werden.
+    """
+    if failures <= 0:
+        return takt
+    # Der Exponent wird gedeckelt, sonst rechnet Python bei einem langen
+    # Ausfall mit sinnlos grossen Zahlen, bevor min() sie wieder wegwirft.
+    return max(takt, min(takt * 2 ** min(failures, 8), cap))
 
 
 @dataclass
@@ -1879,6 +2078,10 @@ def watch(cfg: Config, minutes: int, interval: int,
     siehe interval_for(). Ohne den Wert bleibt der Takt konstant, genau
     wie zuvor.
 
+    Fehlschlaege strecken den Takt zusaetzlich (failure_interval) und
+    beenden den Lauf erst nach FAILURE_LIMIT Versuchen in Folge. Dort steht,
+    warum spaetes Aufgeben hier das kleinere Uebel ist.
+
     Rueckgabewert ist der Exit-Code: 0 = in Ordnung, 1 = Eingriff noetig.
     """
     deadline = clock() + minutes * 60
@@ -1915,14 +2118,17 @@ def watch(cfg: Config, minutes: int, interval: int,
                   file=sys.stderr)
             return 1
 
-        # Drei Fehlschlaege hintereinander sind kein Schluckauf mehr.
-        if consecutive_failures >= 3:
-            print(f"\nDrei Durchlaeufe in Folge fehlgeschlagen:\n{result.message}",
-                  file=sys.stderr)
+        if consecutive_failures >= FAILURE_LIMIT:
+            print(f"\n{consecutive_failures} Durchlaeufe in Folge "
+                  f"fehlgeschlagen:\n{result.message}", file=sys.stderr)
             return 1
 
         takt = (interval if night_interval is None else
                 interval_for(now_local(cfg.timezone), interval, night_interval))
+        # Nach einem Fehlschlag langsamer fragen statt aufzugeben -- siehe
+        # FAILURE_LIMIT. Haelt die Ueberwachung ueber eine kurze Stoerung
+        # hinweg am Leben, ohne einen ohnehin kaputten Server zu bombardieren.
+        takt = failure_interval(takt, consecutive_failures)
 
         remaining = deadline - clock()
         if remaining < takt:
@@ -1961,8 +2167,12 @@ def selftest(cfg: Config) -> int:
             print(f"  [NEIN] {str(exc).splitlines()[0]}")
             ok = False
 
+    # Der Benutzername maskiert: In Actions maskiert GitHub nur registrierte
+    # Secrets, lokal maskiert niemand -- und SETUP schickt Leute genau dorthin,
+    # um eine Diagnoseausgabe zu erzeugen, die man dann gern weiterreicht.
+    # Zum Erkennen des richtigen Kontos reichen Anfang und Ende.
     print(f"WebUntis         {cfg.untis_server} / {cfg.untis_school} "
-          f"/ {cfg.untis_user}")
+          f"/ {mask(cfg.untis_user)}")
     try:
         with Untis(cfg) as untis:
             print("  [ja  ] Anmeldung erfolgreich")
@@ -2033,22 +2243,45 @@ def demo_changes(today: dt.date) -> list[Change]:
     ]
 
 
-def diagnose_lines(cfg: Config) -> list[str]:
+def diagnose_lines(cfg: Config, state_path: Path = STATE_FILE) -> list[str]:
     """Kurzer Befund fuer den Fuss der Testnachricht.
 
     Der eigentliche Zweck der Testnachricht ist das Format -- aber solange
-    sie ohnehin laeuft, beantwortet sie die Frage gleich mit, die man dem
-    Bot im Betrieb sonst NICHT ansieht: ob die Schule das Stundenraster
-    herausgibt. Tut sie es nicht, faellt das lautlos aus -- es bleibt bei
-    Uhrzeiten, und niemand merkt es.
+    sie ohnehin laeuft, beantwortet sie die Fragen gleich mit, die man dem
+    Bot im Betrieb NICHT ansieht:
+
+      * Gibt die Schule das Stundenraster heraus? Tut sie es nicht, faellt
+        das lautlos aus -- es bleibt bei Uhrzeiten, und niemand merkt es.
+      * Kommen ueberhaupt noch Stunden an? Antwortet WebUntis sauber mit 0
+        Stunden -- etwa weil die Schule my_timetable fuer dieses Konto
+        abgedreht hat -- endet der Lauf als NothingToDo: gruen, ohne
+        Fehlermail, ohne Meldung, ohne neu geschriebenen Zustand. Von aussen
+        ist das von Ferien nicht zu unterscheiden. Jeder andere Ausfall
+        endet mit Exit 1 und damit in einer roten Action, dieser eine nicht.
+      * Wie alt ist der gespeicherte Zustand? Erst zusammen mit der
+        Stundenzahl wird der Unterschied sichtbar: 0 Stunden waehrend der
+        Ferien ist normal, 0 Stunden neben einem tagealten Zustand mitten
+        im Schuljahr ist der stille Ausfall.
+
+    Wirft nie -- ein Befund darf die Testnachricht nicht verhindern.
     """
     zeilen = ["", "<i>— Befund —</i>"]
+    jetzt = now_local(cfg.timezone)
+    periods: Periods = {}
+    abrufbar: int | None = None
 
     try:
         with Untis(cfg) as untis:
             periods = untis.timegrid()
+            try:
+                abrufbar = len(untis.timetable(
+                    *window_of(cfg.lookahead_days, jetzt.date())))
+            except NothingToDo:
+                abrufbar = 0
+            except Exception as exc:
+                log.warning("Stundenabruf fuer die Testnachricht "
+                            "fehlgeschlagen: %s", exc)
     except Exception as exc:
-        periods = {}
         log.warning("Raster-Abruf fuer die Testnachricht fehlgeschlagen: %s", exc)
 
     if periods:
@@ -2060,22 +2293,40 @@ def diagnose_lines(cfg: Config) -> list[str]:
                       "Uhrzeiten statt Stundennummern und fassen keine "
                       "Doppelstunden zusammen.</i>")
 
+    if abrufbar is None:
+        zeilen.append("<i>Abrufbare Stunden: Abruf fehlgeschlagen — "
+                      "„bot.py selftest“ sagt, woran es liegt.</i>")
+    elif abrufbar:
+        zeilen.append(f"<i>Abrufbare Stunden: {abrufbar} in den nächsten "
+                      f"{cfg.lookahead_days} Tagen.</i>")
+    else:
+        zeilen.append("<i>Abrufbare Stunden: 0 — Ferien, oder WebUntis gibt "
+                      "diesem Konto keinen Plan mehr heraus. Für den Bot sieht "
+                      "beides gleich aus: Er meldet nichts, schreibt keinen "
+                      "Zustand, und der Lauf bleibt grün.</i>")
+
+    zeilen.append("<i>Gespeicherter Zustand: "
+                  f"{esc(describe_age(read_saved_at(state_path), jetzt))}.</i>")
     return zeilen
 
 
-def testmessage(cfg: Config) -> int:
+def testmessage(cfg: Config, state_path: Path = STATE_FILE) -> int:
     """Schickt eine Beispielnachricht im aktuellen Format an alle Chats.
 
-    Bewusst folgenlos fuer den Betrieb: Es wird kein Zustand gelesen oder
-    geschrieben, kein Kalender angefasst und nichts committet. Ein
-    Produktionslauf ("check") taugt dafuer nicht -- der sendet nur, wenn es
-    zufaellig echte Aenderungen gibt, und veraendert dabei state.json.
+    Bewusst folgenlos fuer den Betrieb: Es wird nichts gespeichert, nichts
+    committet, kein Kalender angefasst. Ein Produktionslauf ("check") taugt
+    dafuer nicht -- der sendet nur, wenn es zufaellig echte Aenderungen
+    gibt, und veraendert dabei state.json.
+
+    Der Befund am Fuss LIEST den Zustand (nur den Zeitstempel, und ohne
+    load_state, das eine kaputte Datei beiseitelegen wuerde) -- geschrieben
+    wird er auch dort nicht.
     """
     today = now_local(cfg.timezone).date()
     text = render(demo_changes(today), today,
                   header="TESTNACHRICHT — so sehen Änderungen künftig aus",
                   periods=DEMO_RASTER)
-    text = "\n".join([text, *diagnose_lines(cfg)])
+    text = "\n".join([text, *diagnose_lines(cfg, state_path)])
 
     try:
         erreicht = send(cfg, text)

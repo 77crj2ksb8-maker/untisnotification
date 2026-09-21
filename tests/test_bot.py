@@ -25,6 +25,8 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -107,6 +109,56 @@ def _leerer_timegrid_cache():
     bot._TIMEGRID_CACHE.clear()
     yield
     bot._TIMEGRID_CACHE.clear()
+
+
+# ===========================================================================
+#  Workflows
+# ===========================================================================
+
+WORKFLOWS = sorted((Path(__file__).resolve().parent.parent
+                    / ".github" / "workflows").glob("*.yml"))
+
+
+def run_bloecke():
+    """Jeder run-Block aller Workflows, als (Datei, Schrittname, Text)."""
+    import yaml
+
+    for datei in WORKFLOWS:
+        beschreibung = yaml.safe_load(datei.read_text(encoding="utf-8"))
+        for job in beschreibung.get("jobs", {}).values():
+            for schritt in job.get("steps", []):
+                if "run" in schritt:
+                    yield (datei.name,
+                           schritt.get("name", "(ohne Namen)"),
+                           schritt["run"])
+
+
+def test_workflows_gefunden():
+    """Wenn die Suche ins Leere greift, prueft der naechste Test nichts."""
+    assert len(WORKFLOWS) >= 2
+
+
+@pytest.mark.parametrize("datei,name,skript",
+                         list(run_bloecke()),
+                         ids=lambda w: str(w)[:40])
+def test_workflow_shell_ist_syntaktisch_gueltig(datei, name, skript):
+    """SICHERHEITSNETZ: Ein Syntaxfehler in einem run-Block faellt sonst
+    erst im Betrieb auf -- und zwar doppelt, weil die Stoermeldung selbst
+    ein run-Block ist und am selben Fehler stirbt. Dann bleibt gar keine
+    Meldung mehr.
+
+    Genau das ist in 2.3.0 passiert: Beim Einfuegen des Meldeschritts
+    rutschte das schliessende "fi" des Ueberwachungsschritts in den neuen
+    Schritt. Die damalige Abnahme hat nur geprueft, dass das YAML parst und
+    der Schritt existiert -- nicht, dass das Skript darin laeuft.
+
+    bash -n prueft nur die Syntax, nicht die Ausfuehrung; die
+    ${{ ... }}-Ausdruecke von GitHub stoeren dabei nicht.
+    """
+    fertig = subprocess.run(["bash", "-n"], input=skript,
+                            capture_output=True, text=True)
+    assert fertig.returncode == 0, (
+        f"{datei} / {name}:\n{fertig.stderr.strip()}\n\n{skript}")
 
 
 # ===========================================================================
@@ -671,10 +723,62 @@ def test_compare_ausfall_zurueckgenommen():
     assert [c.kind for c in aenderungen] == ["uncancelled"]
 
 
-def test_compare_bleibt_abgesagt_meldet_nichts():
+def test_compare_ausfall_zurueckgenommen_nennt_raum_und_vertretung():
+    """SICHERHEITSNETZ: Die Stunde findet wieder statt -- dann ist wichtig,
+    WO und mit WEM. Nur "findet doch statt" schickt den Leser in den alten
+    Raum zur alten Lehrkraft."""
+    alt = lesson(status=CANCELLED, rooms=("R1",), teachers=("Abel",))
+    neu = lesson(rooms=("R9",), teachers=("Zeh",))
+    aenderungen = bot.compare(alt, neu)
+    assert [c.kind for c in aenderungen] == ["uncancelled", "teacher", "room"]
+    assert aenderungen[2].detail == "R1 → R9"
+
+
+def test_compare_ausfall_zurueckgenommen_bleibt_die_leitaenderung():
+    """Das Symbol der Meldung darf nicht zum Raumwechsel kippen."""
+    alt = lesson(status=CANCELLED, rooms=("R1",))
+    eintrag = bot.build_entries(bot.compare(alt, lesson(rooms=("R2",))), RASTER)[0]
+    assert eintrag.lead.kind == "uncancelled"
+    assert eintrag.labels == "findet doch statt, Raumwechsel"
+
+
+def test_compare_ausfall_zurueckgenommen_meldet_neuen_hinweis():
+    alt = lesson(status=CANCELLED, note="Lehrkraft erkrankt")
+    aenderungen = bot.compare(alt, lesson(note="findet in R2 statt"))
+    assert aenderungen[0].detail.endswith("· findet in R2 statt")
+
+
+def test_compare_ausfall_zurueckgenommen_verschweigt_weggefallenen_hinweis():
+    """"Lehrkraft erkrankt" ist die Absagebegruendung -- dass sie hinfaellig
+    ist, sagt schon "findet doch statt". "Hinweis entfernt" waere Laerm."""
+    alt = lesson(status=CANCELLED, note="Lehrkraft erkrankt")
+    aenderungen = bot.compare(alt, lesson(note=""))
+    assert [c.kind for c in aenderungen] == ["uncancelled"]
+    assert aenderungen[0].detail == "Der Ausfall wurde zurückgenommen"
+
+
+def test_compare_bleibt_abgesagt_meldet_keine_felder():
     alt = lesson(status=CANCELLED, rooms=("R1",))
     neu = lesson(status=CANCELLED, rooms=("R2",))
     assert bot.compare(alt, neu) == []
+
+
+def test_compare_bleibt_abgesagt_meldet_geaenderte_info():
+    """SICHERHEITSNETZ: Ueber den Zusatztext teilt die Schule mit, was aus
+    einer abgesagten Stunde stattdessen wird. Dieser Zweig gab frueher
+    pauschal [] zurueck."""
+    alt = lesson(status=CANCELLED, rooms=("R1",))
+    neu = lesson(status=CANCELLED, rooms=("R2",), note="jetzt doch in R2")
+    aenderungen = bot.compare(alt, neu)
+    assert [c.kind for c in aenderungen] == ["note"]
+    assert aenderungen[0].detail == "jetzt doch in R2"
+
+
+def test_compare_bleibt_abgesagt_meldet_entfernte_info():
+    alt = lesson(status=CANCELLED, note="Lehrkraft erkrankt")
+    aenderungen = bot.compare(alt, lesson(status=CANCELLED))
+    assert [c.kind for c in aenderungen] == ["note"]
+    assert aenderungen[0].detail == "(entfernt)"
 
 
 def test_compare_raumwechsel():
@@ -1213,6 +1317,53 @@ def test_entry_trennt_verschiedene_faecher_zur_selben_zeit():
     assert len(bot.build_entries(aenderungen, RASTER)) == 2
 
 
+def test_entry_trennt_parallelkurse_desselben_fachs():
+    """SICHERHEITSNETZ: Zwei Sportgruppen zur selben Stunde, dasselbe
+    Fachkuerzel. Gruppe A entfaellt, Gruppe B wechselt nur den Raum.
+
+    Ohne die Kursgruppe im Schluessel wird daraus EIN Eintrag
+    "Sp — entfaellt, Raumwechsel". Wer in Gruppe B ist, liest "entfaellt"
+    und bleibt zu Hause, obwohl sein Kurs stattfindet."""
+    aenderungen = [
+        Change("cancelled", lesson(uid=1, subjects=("Sp",), group="SpA"),
+               "Lehrkraft erkrankt"),
+        Change("room", lesson(uid=2, subjects=("Sp",), group="SpB"),
+               "Halle → Platz"),
+    ]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert [e.labels for e in eintraege] == ["entfällt", "Raumwechsel"]
+
+
+def test_entry_parallelkurse_bilden_keinen_gemischten_block():
+    """Beide Gruppen entfallen ueber dieselbe Doppelstunde. Ohne die
+    Kursgruppe im Bucket-Schluessel verkettet die Sortierung nach Startzeit
+    Stunde 2 der einen Gruppe an Stunde 1 der anderen -- Bloecke, die es
+    nie gab."""
+    aenderungen = [
+        Change("cancelled", lesson(uid=1, start="07:40", subjects=("Sp",),
+                                   group="SpA"), "krank"),
+        Change("cancelled", lesson(uid=2, start="07:40", subjects=("Sp",),
+                                   group="SpB"), "krank"),
+        Change("cancelled", lesson(uid=3, start="08:30", end="09:15",
+                                   subjects=("Sp",), group="SpA"), "krank"),
+        Change("cancelled", lesson(uid=4, start="08:30", end="09:15",
+                                   subjects=("Sp",), group="SpB"), "krank"),
+    ]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert [e.label for e in eintraege] == ["1./2. Stunde", "1./2. Stunde"]
+
+
+def test_entry_ohne_kursgruppe_unveraendert():
+    """Die meisten Schulen liefern kein sg-Feld. Dann darf sich nichts
+    aendern -- sonst haette der Schluessel den haeufigen Fall verschlechtert,
+    um den seltenen zu retten."""
+    aenderungen = [Change("teacher", lesson(uid=1), "Abel → Zeh"),
+                   Change("room", lesson(uid=1), "R1 → R2")]
+    eintraege = bot.build_entries(aenderungen, RASTER)
+    assert len(eintraege) == 1
+    assert eintraege[0].labels == "Vertretung, Raumwechsel"
+
+
 def test_entry_trennt_verschiedene_tage():
     aenderungen = [Change("room", lesson(uid=1, date=MO), "R1 → R2"),
                    Change("teacher", lesson(uid=2, date=DI), "Abel → Zeh")]
@@ -1401,6 +1552,21 @@ def test_render_knapp_unter_der_schwelle_listet_auf():
     assert "Einzelheiten stehen in WebUntis" not in bot.render(viele, HEUTE)
 
 
+def test_render_schwelle_zaehlt_zeilen_nicht_aenderungen():
+    """Der haeufigste echte Fall -- Vertretung MIT Raumwechsel -- liefert
+    zwei Changes pro Stunde, die zu EINER Zeile werden. An Changes gemessen
+    loeste schon die halbe Stundenzahl die Kurzfassung aus."""
+    viele = [c for i in range(bot.BULK_THRESHOLD - 1)
+             for c in (Change("teacher", lesson(uid=i, start=f"{i:02d}:00"),
+                              "Abel → Zeh"),
+                       Change("room", lesson(uid=i, start=f"{i:02d}:00"),
+                              "R1 → R2"))]
+    assert len(viele) > bot.BULK_THRESHOLD
+    text = bot.render(viele, HEUTE)
+    assert "Einzelheiten stehen in WebUntis" not in text
+    assert text.count("Vertretung, Raumwechsel") == bot.BULK_THRESHOLD - 1
+
+
 def test_render_summary_zaehlt_nach_art():
     aenderungen = [*[Change("cancelled", lesson(uid=i, start=f"{i:02d}:00"))
                      for i in range(3)],
@@ -1502,6 +1668,66 @@ def test_split_zerschneidet_keine_zeile_unnoetig():
 def test_split_bricht_ueberlange_einzelzeile_um():
     teile = bot.split("x" * 500, limit=100)
     assert len(teile) == 5
+
+
+def ist_ausgeglichen(teil):
+    """Prueft die Auszeichnung ohne bot-Hilfsmittel -- sonst pruefte der
+    Test die Funktion mit sich selbst."""
+    for tag in ("b", "i", "s"):
+        auf, zu = teil.count(f"<{tag}>"), teil.count(f"</{tag}>")
+        if auf != zu:
+            return False
+        if auf and teil.index(f"<{tag}>") > teil.index(f"</{tag}>"):
+            return False
+    return True
+
+
+def test_split_zerreisst_die_auszeichnung_nicht():
+    """SICHERHEITSNETZ: Ein sehr langer substText erzeugt eine Zeile
+    jenseits des Limits. Hart geschnitten beginnt der Folgeteil mit
+    "<i>xxx..." und endet ohne "</i>" -- Telegram lehnt ihn ab und
+    _send_chunk schickt ausgerechnet DIESEN Teil als Klartext nach."""
+    text = "<b>Kopf</b>\n    <i>" + "x" * 4000 + "</i>"
+    teile = bot.split(text, limit=1000)
+    assert len(teile) > 2
+    assert all(ist_ausgeglichen(t) for t in teile)
+
+
+def test_split_haelt_das_limit_auch_beim_harten_schnitt():
+    text = "    <i>" + "x" * 4000 + "</i>"
+    assert all(len(t) <= 500 for t in bot.split(text, limit=500))
+
+
+def test_split_schneidet_nie_mitten_in_ein_tag():
+    # Viele kurze Tags: Ein Schnitt auf gut Glueck landet fast sicher in
+    # einem davon.
+    text = "<i>x</i>" * 500
+    for teil in bot.split(text, limit=101):
+        assert "<" not in teil.replace("<i>", "").replace("</i>", "")
+        assert ">" not in teil.replace("<i>", "").replace("</i>", "")
+
+
+def test_split_schneidet_nie_mitten_in_eine_entitaet():
+    """Eine halbierte Entitaet ("&am") ist genauso ungueltig wie ein
+    halbiertes Tag. Das Limit ist so gewaehlt, dass der Schnitt ohne
+    Absicherung MITTEN in einer Entitaet laege -- bei anderen Limits trifft
+    er zufaellig eine Grenze und der Test bewiese nichts."""
+    text = "<i>" + "&amp;" * 400 + "</i>"
+    for teil in bot.split(text, limit=100):
+        rest = teil.replace("&amp;", "").replace("<i>", "").replace("</i>", "")
+        assert "&" not in rest and ";" not in rest
+
+
+def test_split_behaelt_den_text_beim_harten_schnitt():
+    """Nur Auszeichnung darf hinzukommen, kein Zeichen verlorengehen."""
+    text = "    <i>" + "x" * 4000 + "</i>"
+    zusammen = "".join(bot.split(text, limit=600))
+    assert zusammen.count("x") == 4000
+
+
+def test_split_ohne_auszeichnung_unveraendert():
+    """Ohne Tags darf der harte Schnitt genau so arbeiten wie frueher."""
+    assert bot.split("x" * 500, limit=100) == ["x" * 100] * 5
 
 
 def test_split_verliert_nichts():
@@ -2339,7 +2565,19 @@ def test_commit_state_nutzt_add_f(monkeypatch, git_repo):
     fake = FakeGit({"diff": (1, ""), "log": (0, "abc")})
     monkeypatch.setattr(bot, "git", fake)
     bot._commit_state(git_repo)
-    assert fake.hat("add")[0] == ("add", "-f", "state.json")
+    assert fake.hat("add")[0] == ("add", "-f", str(git_repo))
+
+
+def test_commit_state_committet_den_uebergebenen_pfad(monkeypatch, git_repo):
+    """git laeuft mit cwd=BASE_DIR. Ein blosser Dateiname bezoege sich
+    deshalb immer auf BASE_DIR/state.json -- auch wenn geprueft wurde, ob
+    eine ganz andere Datei existiert."""
+    anderer = git_repo.parent / "anderswo.json"
+    anderer.write_text("{}", encoding="utf-8")
+    fake = FakeGit({"diff": (1, ""), "log": (0, "abc")})
+    monkeypatch.setattr(bot, "git", fake)
+    bot._commit_state(anderer)
+    assert fake.hat("add")[0] == ("add", "-f", str(anderer))
 
 
 def test_commit_state_ohne_aenderung_kein_commit(monkeypatch, git_repo):
@@ -2558,17 +2796,66 @@ def test_watch_bricht_bei_fatalem_fehler_ab(cfg, monkeypatch):
     assert code == 1 and laeufe == 1
 
 
-def test_watch_bricht_nach_drei_fehlern_ab(cfg, monkeypatch):
-    fehler = [bot.Result(bot.FAILED, message="weg")] * 3
-    code, laeufe = watch_mit(monkeypatch, cfg, fehler)
-    assert code == 1 and laeufe == 3
+def test_failure_interval_ohne_fehler_unveraendert():
+    assert bot.failure_interval(300, 0) == 300
+
+
+def test_failure_interval_verdoppelt_je_fehlschlag():
+    assert [bot.failure_interval(300, f) for f in (1, 2)] == [600, 900]
+
+
+def test_failure_interval_ist_gedeckelt():
+    assert bot.failure_interval(300, 20) == bot.FAILURE_INTERVAL_MAX
+
+
+def test_failure_interval_wird_nie_kuerzer_als_der_takt():
+    """Sonst beschleunigte ein von Hand gesetztes langes --interval
+    ausgerechnet dann, wenn es klemmt."""
+    assert bot.failure_interval(1800, 3) == 1800
+
+
+def test_watch_haelt_drei_fehlschlaege_aus(cfg, monkeypatch):
+    """Frueher war hier Schluss. Drei Stoerungen kosteten den ganzen Platz
+    in der Laufkette -- und den holt erst die naechste tatsaechliche
+    Cron-Ausloesung zurueck."""
+    folge = [bot.Result(bot.FAILED, message="weg")] * 3 + [bot.Result(bot.OK)]
+    code, laeufe = watch_mit(monkeypatch, cfg, folge, minutes=120)
+    assert code == 0 and laeufe > 3
+
+
+def test_watch_bricht_nach_failure_limit_ab(cfg, monkeypatch):
+    """SICHERHEITSNETZ: Bei einem Dauerausfall muss watch mit Exit 1 enden
+    -- daran haengt der Schritt "Stoerung melden" (if: failure()) im
+    Workflow. Ohne ihn bliebe ein kaputter Bot voellig stumm."""
+    fehler = [bot.Result(bot.FAILED, message="weg")] * bot.FAILURE_LIMIT
+    code, laeufe = watch_mit(monkeypatch, cfg, fehler, minutes=120)
+    assert code == 1 and laeufe == bot.FAILURE_LIMIT
+
+
+def test_watch_streckt_den_takt_nach_fehlschlaegen(cfg, monkeypatch):
+    uhr = Uhr()
+    gewartet = []
+
+    def fake_check(_cfg):
+        uhr.jetzt += 3
+        return bot.Result(bot.FAILED, message="weg")
+
+    def schlafe(sekunden):
+        gewartet.append(sekunden)
+        uhr.jetzt += sekunden
+
+    monkeypatch.setattr(bot, "check_once", fake_check)
+    bot.watch(cfg, 120, 300, sleeper=schlafe, clock=uhr)
+    assert [round(s) for s in gewartet[:2]] == [597, 897]
 
 
 def test_watch_einzelne_fehler_sind_kein_abbruch(cfg, monkeypatch):
     folge = [bot.Result(bot.FAILED, message="weg"), bot.Result(bot.OK),
              bot.Result(bot.FAILED, message="weg"), bot.Result(bot.OK)]
     code, laeufe = watch_mit(monkeypatch, cfg, folge)
-    assert code == 0 and laeufe == 11
+    # Weniger als die elf eines stoerungsfreien Laufs: Die beiden
+    # Fehlschlaege strecken den Takt jeweils einmal.
+    assert code == 0 and laeufe == 9
 
 
 def test_watch_zaehler_wird_bei_erfolg_zurueckgesetzt(cfg, monkeypatch):
@@ -2598,7 +2885,8 @@ def test_watch_faengt_unerwartete_ausnahme(cfg, monkeypatch):
 
     monkeypatch.setattr(bot, "check_once", fake_check)
     code = bot.watch(cfg, 55, 300, sleeper=uhr.schlafe, clock=uhr)
-    assert code == 0 and len(laeufe) == 11
+    # Zehn statt elf Durchlaeufe: Der eine Fehlschlag streckt den Takt einmal.
+    assert code == 0 and len(laeufe) == 10
 
 
 def test_watch_zieht_eigene_laufzeit_vom_takt_ab(cfg, monkeypatch):
@@ -3007,6 +3295,21 @@ def test_selftest_meldet_kaputten_token(cfg, monkeypatch, capsys):
     assert "[NEIN]" in capsys.readouterr().out
 
 
+def test_selftest_zeigt_den_benutzernamen_nicht_im_klartext(cfg, monkeypatch,
+                                                           capsys):
+    """SICHERHEITSNETZ: In Actions maskiert GitHub registrierte Secrets,
+    lokal maskiert niemand -- und SETUP schickt Leute genau dorthin, um eine
+    Diagnoseausgabe zu erzeugen, die man dann weiterreicht."""
+    geheim = dataclasses.replace(cfg, untis_user="max.mustermann.2026")
+    monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {"username": "bot"})
+    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()]))
+    bot.selftest(geheim)
+    ausgabe = capsys.readouterr().out
+    assert "max.mustermann.2026" not in ausgabe
+    # Diagnostisch weiterhin brauchbar: das richtige Konto bleibt erkennbar.
+    assert bot.mask("max.mustermann.2026") in ausgabe
+
+
 def test_show_gibt_plan_aus(cfg, monkeypatch, capsys):
     monkeypatch.setattr(bot, "Untis", FakeUntis([lesson(rooms=("R1",), note="Info")]))
     assert bot.show(cfg, 3) == 0
@@ -3125,6 +3428,108 @@ def test_testmessage_meldet_fehlendes_raster(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis", FakeUntis(timegrid_fehler=True))
     bot.testmessage(cfg)
     assert "NICHT verfügbar" in gesendet[0]
+
+
+def test_read_saved_at_liest_den_zeitstempel(tmp_path):
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson()], (dt.date(2026, 9, 14), dt.date(2026, 9, 21)), pfad)
+    assert bot.read_saved_at(pfad) != ""
+
+
+def test_read_saved_at_ohne_datei(tmp_path):
+    assert bot.read_saved_at(tmp_path / "gibtsnicht.json") == ""
+
+
+def test_read_saved_at_kaputte_datei_legt_nichts_beiseite(tmp_path):
+    """Anders als load_state: Eine Diagnose darf den Zustand nicht anfassen,
+    auch nicht im Fehlerfall."""
+    pfad = tmp_path / "state.json"
+    pfad.write_text("{kein json", encoding="utf-8")
+    assert bot.read_saved_at(pfad) == ""
+    assert pfad.exists() and not (tmp_path / "state.broken").exists()
+
+
+def test_read_saved_at_falsche_huelle(tmp_path):
+    pfad = tmp_path / "state.json"
+    pfad.write_text("[1, 2, 3]", encoding="utf-8")
+    assert bot.read_saved_at(pfad) == ""
+
+
+JETZT = dt.datetime(2026, 9, 21, 12, 0)
+
+
+@pytest.mark.parametrize("gesichert,erwartet", [
+    ("2026-09-21T11:45:00", "vor 15 Minuten gesichert"),
+    ("2026-09-21T09:00:00", "vor 3 Stunden gesichert"),
+    ("2026-09-18T12:00:00", "vor 3 Tagen gesichert"),
+])
+def test_describe_age(gesichert, erwartet):
+    assert bot.describe_age(gesichert, JETZT) == erwartet
+
+
+def test_describe_age_ohne_zustand():
+    assert bot.describe_age("", JETZT) == "keiner vorhanden"
+
+
+def test_describe_age_kaputter_zeitstempel():
+    assert bot.describe_age("neulich", JETZT) == "Zeitstempel unlesbar"
+
+
+def test_describe_age_mit_zeitzone_kippt_nicht():
+    """Der Bot schreibt mit Zone, JETZT kommt ohne -- der Vergleich darf
+    daran nicht scheitern."""
+    assert "gesichert" in bot.describe_age("2026-09-21T09:00:00+02:00", JETZT)
+
+
+def test_describe_age_zukunft():
+    assert bot.describe_age("2026-09-22T12:00:00", JETZT) == "in der Zukunft datiert"
+
+
+def test_testmessage_nennt_die_abrufbare_stundenzahl(cfg, monkeypatch, tmp_path):
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson(), lesson(uid=2)],
+                                                periods=RASTER))
+    bot.testmessage(cfg, tmp_path / "state.json")
+    assert "Abrufbare Stunden: 2" in gesendet[0]
+
+
+def test_testmessage_macht_den_stillen_ausfall_sichtbar(cfg, monkeypatch, tmp_path):
+    """Antwortet WebUntis sauber mit 0 Stunden, bleibt der Lauf gruen und
+    der Bot schweigt unbegrenzt -- von aussen wie Ferien. Der Befund ist
+    die einzige Stelle, an der das ueberhaupt sichtbar wird."""
+    gesendet = []
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis([], periods=RASTER))
+    bot.testmessage(cfg, tmp_path / "state.json")
+    assert "Abrufbare Stunden: 0" in gesendet[0]
+    assert "Gespeicherter Zustand: keiner vorhanden" in gesendet[0]
+
+
+def test_testmessage_nennt_das_alter_des_zustands(cfg, monkeypatch, tmp_path):
+    gesendet = []
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson()], (dt.date(2026, 9, 14), dt.date(2026, 9, 21)), pfad)
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()], periods=RASTER))
+    bot.testmessage(cfg, pfad)
+    assert "Gespeicherter Zustand: vor 0 Minuten gesichert" in gesendet[0]
+
+
+def test_testmessage_ueberlebt_kaputten_stundenabruf(cfg, monkeypatch, tmp_path):
+    """Ein Fehler im Befund darf die Testnachricht nie verhindern."""
+    gesendet = []
+
+    class OhneStunden(FakeUntis):
+        def timetable(self, _start, _end):
+            raise bot.UntisError("Abruf kaputt")
+
+    monkeypatch.setattr(bot, "send", lambda _c, text, **_k: gesendet.append(text) or 1)
+    monkeypatch.setattr(bot, "Untis", OhneStunden(periods=RASTER))
+    assert bot.testmessage(cfg, tmp_path / "state.json") == 0
+    assert "Abrufbare Stunden: Abruf fehlgeschlagen" in gesendet[0]
+    # Das Raster kam vorher an und darf nicht mit verlorengehen.
+    assert "Stundenraster: verfügbar" in gesendet[0]
 
 
 def test_testmessage_ueberlebt_kaputtes_webuntis(cfg, monkeypatch):

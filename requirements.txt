@@ -7,3 +7,9 @@ webuntis>=0.1.24
 # mehr wert als die zwei Sekunden, die der Bot-Job laenger installiert.
 pytest>=8.0
 ruff>=0.5
+
+# Nur damit die Tests die Workflow-Dateien lesen koennen. Ein Syntaxfehler
+# im run-Block eines Workflows faellt sonst erst im Betrieb auf -- und dort
+# ausgerechnet doppelt, weil auch der Meldeschritt ein run-Block ist und am
+# selben Fehler stirbt. Genau das ist in 2.3.0 passiert.
+pyyaml>=6.0

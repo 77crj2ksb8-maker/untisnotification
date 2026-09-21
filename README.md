@@ -30,8 +30,9 @@ Einrichtung im eigenen Repo: **[SETUP.md](SETUP.md)**.
   Raumwechsel ist *ein* Eintrag, nicht zwei.
 * **Mehrere Empfänger** — `TELEGRAM_CHAT_ID` nimmt kommagetrennte IDs. Hängt
   ein Chat, bekommen die anderen ihre Nachricht trotzdem.
-* **Kurzfassung bei Massenänderungen** — ab 40 Änderungen wird gezählt statt
-  aufgelistet. Fünfzig Zeilen liest niemand.
+* **Kurzfassung bei Massenänderungen** — ab 40 **Einträgen** wird gezählt statt
+  aufgelistet. Fünfzig Zeilen liest niemand — gemessen werden deshalb Zeilen,
+  nicht Änderungen: Eine Vertretung mit Raumwechsel ist *eine* Zeile.
 * **Bremse gegen Fehlalarme** — liefert WebUntis wegen Wartung plötzlich viel
   weniger Stunden, meldet der Bot nicht „alles entfällt", sondern wartet auf
   Bestätigung.
@@ -121,8 +122,13 @@ Der Bot meldet sich von selbst — zweistufig, weil ein Job, der nie startet,
 sich auch nicht beschweren kann.
 
 **Ein Lauf scheitert** → der Workflow schickt eine Telegram-Meldung mit Link
-zum fehlgeschlagenen Lauf. Das greift bei abgelehnten Zugangsdaten, drei
-Fehlschlägen in Folge, einer übersehenen Ausnahme und beim Timeout.
+zum fehlgeschlagenen Lauf. Das greift bei abgelehnten Zugangsdaten, einem
+anhaltenden Ausfall, einer übersehenen Ausnahme und beim Timeout.
+
+Eine einzelne Störung beendet den Lauf **nicht**. Nach jedem Fehlschlag wird
+der Takt verdoppelt (gedeckelt bei 15 Minuten); erst nach sechs Fehlschlägen in
+Folge gibt der Lauf auf. Eine halbstündige WebUntis-Wartung kostet damit drei
+Fehlversuche statt des ganzen 5,5-Stunden-Platzes.
 
 **Es läuft gar nichts mehr** → der Wachhund (`watchdog.yml`) sieht alle vier
 Stunden nach, wann der letzte Überwachungslauf begonnen hat. Ist das länger
@@ -161,7 +167,7 @@ gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
 ```
 bot.py                              der ganze Bot
-tests/test_bot.py                   411 Tests, ohne Netz lauffähig
+tests/test_bot.py                   460 Tests, ohne Netz lauffähig
 pyproject.toml                      Einstellungen für pytest und ruff
 requirements.txt                    Abhängigkeiten
 .env.example                        Vorlage für die lokale Entwicklung
@@ -199,7 +205,7 @@ Logging statt Weiterreichen.
 ```bash
 pip install -r requirements.txt
 
-python -m pytest             # 411 Tests, keine Netzverbindung nötig
+python -m pytest             # 460 Tests, keine Netzverbindung nötig
 ruff check .                 # Linter
 ```
 
@@ -228,6 +234,21 @@ markiert:
 | keine Massenmeldung bei Datenproblemen | `test_unplausibel_wenn_grosser_teil_weg` |
 | unveränderter Zustand wird nicht neu geschrieben (Commit-Flut) | `test_save_state_schreibt_unveraenderten_zustand_nicht_neu` |
 | eine Testnachricht ändert nichts am Zustand | `test_testmessage_ruehrt_den_zustand_nicht_an` |
+| eine Störmeldung ändert nichts am Zustand | `test_alert_ruehrt_den_zustand_nicht_an` |
+| der Telegram-Token steht in keiner Fehlermeldung | `test_telegram_call_leakt_den_token_nicht` |
+| der WebUntis-Benutzername steht in keiner Diagnoseausgabe | `test_selftest_zeigt_den_benutzernamen_nicht_im_klartext` |
+| ein kaputtes Datum tötet nicht jeden weiteren Lauf | `test_from_json_weist_kaputtes_datum_ab` |
+| WebUntis-Aufrufe hängen nicht unbegrenzt | `test_enforce_network_timeout_setzt_grenze` |
+| Parallelkurse verschmelzen nicht zu einer falschen Meldung | `test_entry_trennt_parallelkurse_desselben_fachs` |
+| `split()` zerreißt die HTML-Auszeichnung nicht | `test_split_zerreisst_die_auszeichnung_nicht` |
+| ein Dauerausfall endet mit Exit 1 (sonst käme keine Störmeldung) | `test_watch_bricht_nach_failure_limit_ab` |
+| jeder `run`-Block der Workflows ist gültige Shell | `test_workflow_shell_ist_syntaktisch_gueltig` |
+
+Der letzte ist aus Schaden entstanden: In 2.3.0 rutschte beim Einfügen des
+Meldeschritts das schließende `fi` des Überwachungsschritts in den neuen
+Schritt. Jeder Lauf wäre vor der ersten Zeile gescheitert — und die
+Störmeldung am selben Fehler mit. Die damalige Abnahme prüfte nur, dass das
+YAML parst und der Schritt existiert, nicht dass das Skript darin läuft.
 
 Kommentare erklären das **Warum**, nicht das Was. Eine Zeile, die nur
 wiederholt was ohnehin dasteht, kann weg.

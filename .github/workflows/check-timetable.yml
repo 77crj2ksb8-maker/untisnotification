@@ -124,14 +124,15 @@ jobs:
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             python bot.py watch \
-            --minutes "${{ github.event.inputs.minuten || '330' }}" \
-            --interval 300 \
-            --night-interval 1800
+              --minutes "${{ github.event.inputs.minuten || '330' }}" \
+              --interval 300 \
+              --night-interval 1800
+          fi
 
       # Meldet sich selbst, statt darauf zu hoffen, dass jemand in den
       # Actions-Tab schaut. Greift bei allem, was den Lauf scheitern
-      # laesst: abgelehnte Zugangsdaten, drei Fehlschlaege in Folge, eine
-      # uebersehene Ausnahme, ein Timeout.
+      # laesst: abgelehnte Zugangsdaten, ein anhaltender Ausfall (siehe
+      # FAILURE_LIMIT in bot.py), eine uebersehene Ausnahme, ein Timeout.
       #
       # Abgebrochene Laeufe loesen das NICHT aus -- "cancelled" ist kein
       # "failure". Das ist wichtig, denn die Laufkette bricht staendig
@@ -149,7 +150,6 @@ jobs:
           python bot.py alert \
             "Der Überwachungslauf ist fehlgeschlagen. Bis zur Behebung werden keine Stundenplanänderungen gemeldet." \
             --quelle "Lauf ${{ github.run_number }} · ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          fi
 
 # Hinweis: GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein
 # Commit im Repo passiert -- etwa ueber die Sommerferien. Da der Bot seinen
