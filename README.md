@@ -71,6 +71,7 @@ Secrets also nie.
 | `WEBUNTIS_KLASSE` | optional | **Rückfall**, kein Umschalter — siehe unten |
 | `LOOKAHEAD_DAYS` | optional | Vorausschau in Tagen, Standard 7, begrenzt auf 1–30 |
 | `TIMEZONE` | optional | Standard `Europe/Berlin` |
+| `LOG_LEVEL` | optional | Standard `INFO`; `DEBUG` zeigt auch, was die `webuntis`-Bibliothek treibt. `--log` auf der Kommandozeile gewinnt |
 
 `WEBUNTIS_KLASSE` greift **nur**, wenn der persönliche Stundenplan gar nicht
 abrufbar ist. Liefert `my_timetable` Stunden, gewinnt der immer. Wer den
@@ -136,6 +137,12 @@ als 8 Stunden her, meldet er sich. Genau dieser Fall ist schon eingetreten:
 Die Laufkette stand drei Tage still und fiel nur durch zufälliges Nachsehen
 auf.
 
+Anwerfen lässt sie sich von Hand: *Actions → „Stundenplan pruefen" → Run
+workflow*, **modus** auf `watch` lassen und **minuten** nicht anfassen. Der
+Standard ist der volle 5,5-Stunden-Lauf — genau deshalb, denn erst der
+hinterlässt wieder einen wartenden Lauf. Ein kurzer Lauf endet, und danach
+steht die Kette wieder.
+
 Zwei Grenzen, die kein Code beheben kann:
 
 * **Ist Telegram selbst kaputt**, kann der Bot sich nicht über Telegram
@@ -167,7 +174,7 @@ gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
 ```
 bot.py                              der ganze Bot
-tests/test_bot.py                   460 Tests, ohne Netz lauffähig
+tests/test_bot.py                   463 Tests, ohne Netz lauffähig
 pyproject.toml                      Einstellungen für pytest und ruff
 requirements.txt                    Abhängigkeiten
 .env.example                        Vorlage für die lokale Entwicklung
@@ -205,7 +212,7 @@ Logging statt Weiterreichen.
 ```bash
 pip install -r requirements.txt
 
-python -m pytest             # 460 Tests, keine Netzverbindung nötig
+python -m pytest             # 463 Tests, keine Netzverbindung nötig
 ruff check .                 # Linter
 ```
 
@@ -224,14 +231,20 @@ python bot.py check --dry-run # prüft, ohne zu senden oder zu speichern
 
 Bei sicherheitskritischer Logik gilt zusätzlich ein Mutationstest:
 Guard-Klausel testweise entfernen, prüfen dass ein Test rot wird,
-zurücksetzen. Vier Zusicherungen sind im Testcode als `SICHERHEITSNETZ`
-markiert:
+zurücksetzen. Jeder Test, an dem so eine Zusicherung hängt, trägt im
+Docstring das Wort `SICHERHEITSNETZ` und die Mutation, die ihn rot machen
+muss. Diese Tabelle listet **alle** — ein Test wacht darüber, dass sie
+vollständig bleibt:
 
 | Zusicherung | Wächter |
 |---|---|
 | nie dieselbe Änderung zweimal melden | `test_check_meldet_dieselbe_aenderung_nie_zweimal` |
+| der gemeldete Stand landet auch im Repo, nicht nur auf der Platte | `test_check_sichert_zustand_auch_nach_dem_melden` |
+| eine Teilzustellung gilt als Erfolg — Wiederholen erzeugt Dopplungen | `test_send_teilzustellung_gilt_als_erfolg` |
 | ein git-Fehler kippt nie einen Lauf, in dem schon gesendet wurde | `test_commit_state_wirft_nie` |
 | keine Massenmeldung bei Datenproblemen | `test_unplausibel_wenn_grosser_teil_weg` |
+| „findet doch statt“ nennt auch den neuen Raum und die Vertretung | `test_compare_ausfall_zurueckgenommen_nennt_raum_und_vertretung` |
+| auch an einer abgesagten Stunde ändert sich noch etwas | `test_compare_bleibt_abgesagt_meldet_geaenderte_info` |
 | unveränderter Zustand wird nicht neu geschrieben (Commit-Flut) | `test_save_state_schreibt_unveraenderten_zustand_nicht_neu` |
 | eine Testnachricht ändert nichts am Zustand | `test_testmessage_ruehrt_den_zustand_nicht_an` |
 | eine Störmeldung ändert nichts am Zustand | `test_alert_ruehrt_den_zustand_nicht_an` |

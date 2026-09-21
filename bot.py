@@ -18,7 +18,7 @@ Aufbau, von innen nach aussen:
 Aufrufe:
 
     python bot.py check              einmal pruefen
-    python bot.py watch --minutes 55 55 Minuten lang alle 5 Minuten pruefen
+    python bot.py watch              5,5 Stunden lang im Takt pruefen
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py alert "..."        Stoermeldung senden
@@ -57,7 +57,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -1298,31 +1298,14 @@ def render_summary(changes: Sequence[Change], bulk_note: str = "") -> str:
     return "\n".join(lines)
 
 
-def render_plan(lessons: Sequence[Lesson], today: dt.date) -> str:
-    """Kompletter Plan -- fuer Diagnose und den spaeteren /heute-Befehl."""
-    if not lessons:
-        return "<b>Keine Stunden im Plan.</b>"
-
-    lines: list[str] = []
-    current: str | None = None
-    for lesson in sorted(lessons, key=chronological):
-        if lesson.date != current:
-            current = lesson.date
-            rel = relative(current, today)
-            suffix = f" <i>({rel})</i>" if rel else ""
-            lines.append("")
-            lines.append(f"<b>{esc(day_header(current))}</b>{suffix}")
-
-        room = f" · {esc(_join(lesson.rooms))}" if lesson.rooms else ""
-        if lesson.status == CANCELLED:
-            lines.append(f"❌ <b>{esc(lesson.start)}</b> <s>{esc(lesson.title)}</s>")
-        else:
-            lines.append(f"<b>{esc(lesson.start)}</b> {esc(lesson.title)}{room}")
-
-    return "\n".join(lines).strip()
-
-
+#: Telegrams harte Grenze. Steht hier, obwohl der Code sie nie liest:
+#: Sie ist die Begruendung fuer SPLIT_AT, und ein Test haelt den Abstand
+#: fest. Ohne sie waere die 3500 eine Zahl ohne Herkunft.
 MAX_LEN = 4096
+
+#: Der Schnitt liegt bewusst deutlich darunter. Geschnitten wird an
+#: Zeilengrenzen, und offene Tags werden am Ende neu geschlossen -- beides
+#: macht das Stueck laenger, als der Zaehler beim Schneiden wusste.
 SPLIT_AT = 3500
 
 #: Was beim Schneiden nicht auseinandergerissen werden darf: ein Tag und
@@ -2439,7 +2422,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                          help="nichts senden, nichts speichern")
 
     p_watch = sub.add_parser("watch", help="laenger pruefen, in festem Takt")
-    p_watch.add_argument("--minutes", type=int, default=55)
+    # 330 Minuten = 5,5 Stunden: die Laufzeit, auf die die Laufkette
+    # ausgelegt ist (siehe Kopfkommentar in check-timetable.yml). Ein
+    # kuerzerer Lauf endet, ohne einen wartenden zu hinterlassen.
+    p_watch.add_argument("--minutes", type=int, default=330)
     p_watch.add_argument("--interval", type=int, default=300,
                          help="Sekunden zwischen zwei Pruefungen (Schulzeit)")
     p_watch.add_argument("--night-interval", type=int, default=None,

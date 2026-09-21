@@ -7,17 +7,21 @@ ohne Wartezeit -- deshalb koennen es viele sein.
 Die duenne I/O-Schicht wird mit Attrappen geprueft, nicht gegen echte
 Server. Getestet wird dort nur, was schiefgehen KANN: Wiederholungen,
 Rueckfallebenen, und vor allem die Zusicherungen, auf die man sich
-verlassen koennen muss --
+verlassen koennen muss -- dass nie derselbe Stand zweimal gemeldet wird
+etwa, oder dass ein git-Fehler keinen Lauf kippt, in dem schon gesendet
+wurde.
 
-    * es wird nie derselbe Stand zweimal an Telegram gemeldet
-    * ein git-Fehler kippt nie einen Lauf, in dem schon gesendet wurde
-    * bei einem Datenproblem kommt keine Massenmeldung
-    * ein unveraenderter Zustand wird nicht neu geschrieben (Commit-Flut)
-    * eine Testnachricht veraendert nichts am gespeicherten Zustand
+Jeder Test, an dem eine solche Zusicherung haengt, traegt das Wort
+SICHERHEITSNETZ im Docstring und dazu die Mutation, die ihn rot machen
+muss: Guard-Klausel testweise entfernen, Test laufen lassen,
+zurueckbauen. Welche das sind, sagt
 
-Diese fuenf sind ausdruecklich markiert (SICHERHEITSNETZ) und eignen sich
-fuer einen Mutationstest: Guard-Klausel entfernen -> der jeweils genannte
-Test muss rot werden.
+    grep -n SICHERHEITSNETZ tests/test_bot.py
+
+Hier stand frueher eine Aufzaehlung mit fester Anzahl. Die wurde zweimal
+falsch, weil neue Netze dazukamen und niemand den Satz nachzog -- die
+Liste steht jetzt nur noch in der README, und
+test_readme_nennt_jedes_sicherheitsnetz haelt sie dort aktuell.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -162,6 +167,51 @@ def test_workflow_shell_ist_syntaktisch_gueltig(datei, name, skript):
 
 
 # ===========================================================================
+#  Doku
+# ===========================================================================
+
+def sicherheitsnetze() -> set[str]:
+    """Die Tests, deren Docstring SICHERHEITSNETZ nennt.
+
+    Bewusst textuell statt ueber Import und __doc__: So faellt auch ein
+    Marker auf, der in einem uebersprungenen oder auskommentierten Test
+    steckt.
+    """
+    quelle = Path(__file__).read_text(encoding="utf-8")
+    treffer: set[str] = set()
+    name: str | None = None
+    for zeile in quelle.splitlines():
+        passend = re.match(r"def (test_\w+)", zeile)
+        if passend:
+            name = passend.group(1)
+        elif name and zeile.lstrip().startswith('"""') and "SICHERHEITSNETZ" in zeile:
+            treffer.add(name)
+    return treffer
+
+
+def test_readme_nennt_jedes_sicherheitsnetz():
+    """Die README fuehrt die Zusicherungen als Tabelle -- und behauptet, das
+    seien alle. Zweimal stimmte das nicht: Erst blieb die Anzahl im Text
+    stehen, waehrend die Tabelle wuchs, dann fehlten zwei Netze ganz.
+    Beides faellt niemandem auf, denn eine Doku wird nicht ausgefuehrt.
+
+    Also wird sie hier ausgefuehrt. Ein neues SICHERHEITSNETZ ohne Zeile in
+    der Tabelle macht diesen Test rot, eine geloeschte oder umbenannte
+    Zeile ebenso.
+    """
+    readme = (Path(__file__).resolve().parent.parent
+              / "README.md").read_text(encoding="utf-8")
+    # Nur die Tabelle, nicht der uebrige Fliesstext: Zeilen der Form
+    # "| Zusicherung | `test_...` |".
+    genannt = set(re.findall(r"^\|.*\|\s*`(test_\w+)`\s*\|$",
+                             readme, re.MULTILINE))
+    netze = sicherheitsnetze()
+    assert netze, "kein einziger Marker gefunden -- die Suche ist kaputt"
+    assert netze - genannt == set(), "in der README nicht aufgefuehrt"
+    assert genannt - netze == set(), "in der README aufgefuehrt, aber kein Netz"
+
+
+# ===========================================================================
 #  Konfiguration
 # ===========================================================================
 
@@ -271,6 +321,30 @@ def test_dotenv_ignoriert_kommentare_und_muell(tmp_path, monkeypatch):
                      encoding="utf-8")
     bot._load_dotenv(datei)
     assert bot.os.environ["FOO_C"] == "wert"
+
+
+def test_dotenv_ignoriert_auskommentierte_zuweisung(tmp_path):
+    """Genau die Form, die .env.example liefert -- und SETUP sagt, man soll
+    die Datei kopieren. Anders als "# Kommentar" enthaelt "#LOOKAHEAD_DAYS=7"
+    ein "=", faellt also nicht in den Muell-Zweig: Nur die Kommentarpruefung
+    haelt sie auf. Ohne sie legte jeder Kopierer Variablen wie
+    "#LOOKAHEAD_DAYS" in seiner Umgebung an.
+
+    Mutationstest: startswith("#") aus _load_dotenv entfernen -> dieser
+    Test muss rot werden.
+    """
+    datei = tmp_path / ".env"
+    datei.write_text("#LOOKAHEAD_DAYS=7\n# TIMEZONE=Europe/Berlin\n",
+                     encoding="utf-8")
+    vorher = set(bot.os.environ)
+    bot._load_dotenv(datei)
+
+    # Erst aufraeumen, dann pruefen: Sonst schleppte ein Fehlschlag seinen
+    # Muell in jeden folgenden Test.
+    dazu = sorted(set(bot.os.environ) - vorher)
+    for name in dazu:
+        del bot.os.environ[name]
+    assert dazu == []
 
 
 def test_dotenv_ohne_datei_ist_kein_fehler(tmp_path):
@@ -543,6 +617,24 @@ def test_text_hilfsfunktion():
     assert bot._text(7) == "7"
 
 
+def test_chronological_ordnet_gleichzeitige_stunden_eindeutig():
+    """Zwei Parallelkurse zur selben Zeit muessen in BEIDER
+    Eingabereihenfolge gleich herauskommen -- genau der in 2.1.0 behobene
+    Fehler: "Bei zwei gleichzeitigen Stunden hing die Reihenfolge davon ab,
+    wie WebUntis gerade auslieferte."
+
+    Beide Reihenfolgen zu pruefen ist der Kern: Bei nur einer rettet
+    Pythons stabile Sortierung jede kaputte Variante des Schluessels.
+
+    Mutationstest: in chronological() lesson.key durch "" ersetzen ->
+    dieser Test muss rot werden.
+    """
+    d = lesson(uid=1, subjects=("D",))
+    m = lesson(uid=2, subjects=("M",))
+    assert [s.title for s in sorted([d, m], key=bot.chronological)] == ["D", "M"]
+    assert [s.title for s in sorted([m, d], key=bot.chronological)] == ["D", "M"]
+
+
 # ===========================================================================
 #  Fenster und Zuordnung
 # ===========================================================================
@@ -654,10 +746,22 @@ def test_pair_up_parallelkurse_werden_nicht_vertauscht():
 
 def test_pair_up_beste_paarung_gewinnt_nicht_die_erste():
     """Konkurrieren zwei alte Stunden um denselben neuen Eintrag, darf nicht
-    die zufaellig zuerst gelistete gewinnen."""
-    schwach = lesson(uid=1, subjects=("D",), lesson_no=None)
-    stark = lesson(uid=2, subjects=("M",), lesson_no=500)
-    kandidat = lesson(uid=99, subjects=("M",), lesson_no=500)
+    die zufaellig zuerst gelistete gewinnen.
+
+    Der gemeinsame Raum ist der Grund, warum "schwach" ueberhaupt mitspielt:
+    Er hebt den Score von 1 auf 2 und damit ueber die Schwelle in pair_up.
+    Ohne ihn waere "stark" der einzige Bewerber -- und die Sortierung nach
+    Guete haette gar nichts zu entscheiden.
+
+    Mutationstest: candidates.sort() in pair_up entfernen -> dieser Test
+    muss rot werden. Scores hier: schwach 2, stark 16.
+    """
+    schwach = lesson(uid=1, subjects=("D",), rooms=("R1",), lesson_no=None)
+    stark = lesson(uid=2, subjects=("M",), rooms=("R1",), lesson_no=500)
+    kandidat = lesson(uid=99, subjects=("M",), rooms=("R1",), lesson_no=500)
+    assert bot._match_score(schwach, kandidat) == 2
+    assert bot._match_score(stark, kandidat) == 16
+
     paare, _nur_alt, _nur_neu = bot.pair_up([schwach, stark], [kandidat])
     assert len(paare) == 1
     assert paare[0][0].subjects == ("M",)
@@ -948,14 +1052,32 @@ def test_plausibel_bei_normalen_aenderungen():
 
 
 def test_unplausibel_wenn_alles_weg():
+    """Das Muster ist absichtlich eng: "0 Stunden" allein steckt auch in der
+    Meldung des ratio-Pfads -- "10 von 10 Stunden (100%)". Der Test wurde
+    damit auch dann gruen, wenn der Guard ersatzlos verschwand, und prueft
+    dann in Wahrheit einen ganz anderen Codepfad.
+
+    Mutationstest: "if not new: raise" in check_plausible entfernen ->
+    dieser Test muss rot werden.
+    """
     alt = [lesson(uid=i, start=f"{7+i:02d}:40") for i in range(10)]
-    with pytest.raises(Implausible, match="0 Stunden"):
+    with pytest.raises(Implausible, match=r"lieferte 0 Stunden"):
         bot.check_plausible(alt, [], None)
 
 
 def test_unplausibel_wenn_grosser_teil_weg():
+    """SICHERHEITSNETZ: Der haeufigere Fall als die leere Antwort -- WebUntis
+    liefert einen Teil. Ohne die Bremse meldete der Bot acht Ausfaelle auf
+    einmal, und niemand koennte der Meldung noch trauen.
+
+    Das Muster nennt die Zahlen, nicht nur das Prozentzeichen: Sonst genuegte
+    irgendeine Implausible-Meldung, auch die aus dem Zweig daneben.
+
+    Mutationstest: "if ratio > max_vanish: raise" in check_plausible
+    entfernen -> dieser Test muss rot werden.
+    """
     alt = [lesson(uid=i, start=f"{7+i:02d}:40") for i in range(10)]
-    with pytest.raises(Implausible, match="%"):
+    with pytest.raises(Implausible, match=r"8 von 10 Stunden \(80%\)"):
         bot.check_plausible(alt, alt[:2], None)
 
 
@@ -1622,27 +1744,6 @@ def test_render_summary_mit_notiz():
     assert "<i>Großflächig geändert.</i>" in text
 
 
-def test_render_plan_leer():
-    assert bot.render_plan([], HEUTE) == "<b>Keine Stunden im Plan.</b>"
-
-
-def test_render_plan_zeigt_stunden():
-    text = bot.render_plan([lesson(rooms=("R1",))], HEUTE)
-    assert "07:40" in text and "M" in text and "R1" in text
-
-
-def test_render_plan_streicht_ausfall_durch():
-    text = bot.render_plan([lesson(status=CANCELLED)], HEUTE)
-    assert "<s>M</s>" in text and "❌" in text
-
-
-def test_render_plan_sortiert():
-    stunden = [lesson(uid=1, date=MI, start="11:30"),
-               lesson(uid=2, date=MO, start="07:40")]
-    text = bot.render_plan(stunden, HEUTE)
-    assert text.index("Montag") < text.index("Mittwoch")
-
-
 # ===========================================================================
 #  split / strip_html
 # ===========================================================================
@@ -1977,6 +2078,33 @@ def test_send_ein_kaputter_chat_stoppt_die_anderen_nicht(cfg, monkeypatch):
     assert "43" in [a["chat_id"] for a in aufrufe]
 
 
+def test_send_teilzustellung_gilt_als_erfolg(cfg, monkeypatch):
+    """SICHERHEITSNETZ: Bricht der Versand zwischen zwei Teilen ab, ist der
+    Empfaenger halb bedient. Als Fehlschlag gewertet, versuchte der naechste
+    Durchlauf dieselbe Meldung erneut -- und der erste Teil kaeme ein zweites
+    Mal an. Hier erreicht KEIN Chat alle Teile; send() darf trotzdem nicht
+    werfen.
+
+    Mutationstest: in send() "if complete or partial" zu "if complete"
+    aendern -> dieser Test muss rot werden.
+    """
+    aufrufe = []
+
+    def fake_post(url, json=None, timeout=None):
+        aufrufe.append(json)
+        if len(aufrufe) == 1:
+            return FakeResponse({"ok": True, "result": {}})
+        return FakeResponse({"ok": False, "error_code": 400,
+                             "description": "chat not found"})
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    text = "\n".join(["x" * 100] * 100)
+    assert len(bot.split(text)) > 1, "sonst prueft der Test die Teilung nicht"
+
+    assert bot.send(cfg, text) == 1
+    assert len(aufrufe) == 2   # nach dem Fehlschlag wird nicht weitergesendet
+
+
 def test_send_ohne_empfaenger(cfg):
     cfg = dataclasses.replace(cfg, telegram_chats=())
     with pytest.raises(TelegramError, match="Kein Empfaenger"):
@@ -2175,8 +2303,17 @@ def test_save_state_laesst_keine_temporaeren_dateien_zurueck(tmp_path):
 
 
 def test_load_state_verwirft_altes_schema(tmp_path):
+    """Das gueltige Fenster gehoert ins Fixture: Ohne es greift der
+    Fenster-Guard, und der Test wuerde auch ohne jede Schema-Pruefung gruen.
+
+    Mutationstest: "if raw.get("schema") != SCHEMA" zu "if False" machen ->
+    dieser Test muss rot werden.
+    """
     pfad = tmp_path / "state.json"
-    pfad.write_text(json.dumps({"schema": 1, "lessons": []}), encoding="utf-8")
+    pfad.write_text(json.dumps({"schema": 1, "lessons": [],
+                                "window": {"from": "2026-09-14",
+                                           "to": "2026-09-21"}}),
+                    encoding="utf-8")
     assert bot.load_state(pfad).exists is False
 
 
@@ -2299,8 +2436,12 @@ def ablauf(monkeypatch, tmp_path):
         return True
 
     monkeypatch.setattr(bot, "commit_state", fake_commit)
-    monkeypatch.setattr(bot, "now_local",
-                        lambda _tz: dt.datetime(2026, 9, 14, 8, 0))
+    # Die Uhr liegt im Protokoll statt in der Lambda, damit ein Test sie
+    # weiterstellen kann. Erst dann rollt das Abruffenster wie im Betrieb --
+    # ohne das gilt in jedem Test overlap(win, previous.window) == win, und
+    # die ganze Fensterverdrahtung bleibt ungeprueft.
+    protokoll["jetzt"] = dt.datetime(2026, 9, 14, 8, 0)
+    monkeypatch.setattr(bot, "now_local", lambda _tz: protokoll["jetzt"])
     protokoll["pfad"] = tmp_path / "state.json"
     protokoll["monkeypatch"] = monkeypatch
     return protokoll
@@ -2308,6 +2449,11 @@ def ablauf(monkeypatch, tmp_path):
 
 def untis_liefert(ablauf, lessons=(), periods=None, fehler=None):
     ablauf["monkeypatch"].setattr(bot, "Untis", FakeUntis(lessons, periods, fehler))
+
+
+def am_tag(ablauf, jahr, monat, tag):
+    """Stellt die Uhr des Ablaufs auf 8 Uhr des genannten Tages."""
+    ablauf["jetzt"] = dt.datetime(jahr, monat, tag, 8, 0)
 
 
 def test_check_erstlauf_sendet_nichts(cfg, ablauf):
@@ -2493,11 +2639,85 @@ def test_check_fenster_komplett_verschoben(cfg, ablauf):
     assert ablauf["gesendet"] == []
 
 
+def test_check_meldet_neu_ins_fenster_gerollte_stunden_nicht(cfg, ablauf):
+    """Das Abruffenster rollt taeglich weiter. Was heute neu hineinrutscht,
+    war gestern nicht im Blick -- diese Stunden sind nicht "hinzugekommen",
+    sie wurden nur noch nie betrachtet. Bricht die Verdrahtung, meldet der
+    Bot jeden Morgen einen kompletten Schultag als "➕ neuer Termin".
+
+    Gespeichertes Fenster 07.-14.09., heute der 14.09., neues Fenster
+    14.-21.09. -- die Ueberlappung ist genau ein Tag.
+
+    Mutationstest: in check_once diff(..., compare_win) zu diff(..., win)
+    -> dieser Test muss rot werden.
+    """
+    am_tag(ablauf, 2026, 9, 7)
+    untis_liefert(ablauf, [lesson(uid=1, date="2026-09-07"),
+                           lesson(uid=2, date="2026-09-14")])
+    bot.check_once(cfg, state_path=ablauf["pfad"])
+
+    am_tag(ablauf, 2026, 9, 14)
+    untis_liefert(ablauf, [lesson(uid=2, date="2026-09-14"),
+                           lesson(uid=3, date="2026-09-21")])
+    ergebnis = bot.check_once(cfg, state_path=ablauf["pfad"])
+
+    assert ablauf["gesendet"] == []
+    assert "Keine Aenderungen" in ergebnis.message
+
+
+def test_check_plausibilitaet_misst_nur_die_ueberlappung(cfg, ablauf):
+    """Der zweite Fehlermodus derselben Verdrahtung: Zaehlt die Bremse auch
+    die aus dem Fenster gerollten Stunden als verschwunden, schlaegt sie
+    jeden Tag an -- und der Bot meldet dauerhaft nichts mehr.
+
+    Mutationstest: in check_once check_plausible(..., compare_win) zu
+    check_plausible(..., None) -> dieser Test muss rot werden.
+    """
+    alte_woche = [lesson(uid=i + 1, date=f"2026-09-{i + 7:02d}") for i in range(8)]
+    am_tag(ablauf, 2026, 9, 7)
+    untis_liefert(ablauf, alte_woche)
+    bot.check_once(cfg, state_path=ablauf["pfad"])
+
+    # Der 14.09. ist der einzige Tag, den beide Fenster abdecken -- und er
+    # steht unveraendert in beiden Abrufen.
+    neue_woche = [alte_woche[-1],
+                  *[lesson(uid=20 + i, date=f"2026-09-{i + 15:02d}")
+                    for i in range(7)]]
+    am_tag(ablauf, 2026, 9, 14)
+    untis_liefert(ablauf, neue_woche)
+    ergebnis = bot.check_once(cfg, state_path=ablauf["pfad"])
+
+    assert ergebnis.status == bot.OK
+    assert "Keine Aenderungen" in ergebnis.message
+
+
 def test_check_sichert_zustand_nach_jedem_lauf(cfg, ablauf):
     untis_liefert(ablauf, [lesson(uid=1)])
     bot.check_once(cfg, state_path=ablauf["pfad"])
     bot.check_once(cfg, state_path=ablauf["pfad"])
     assert ablauf["committed"] == 2
+
+
+def test_check_sichert_zustand_auch_nach_dem_melden(cfg, ablauf):
+    """SICHERHEITSNETZ: Der Melde-Pfad ist der, an dem die Zusicherung "nie
+    dieselbe Aenderung zweimal melden" haengt -- und der einzige, in dem
+    Speichern allein nicht genuegt. Ohne Push holt der naechste
+    Actions-Job einen Checkout mit der ALTEN state.json und meldet dieselbe
+    Aenderung erneut. Der Test daneben deckt nur Erstlauf und "keine
+    Aenderungen" ab.
+
+    Mutationstest: das commit_state() NACH send() in check_once entfernen
+    -> dieser Test muss rot werden.
+    """
+    untis_liefert(ablauf, [lesson(uid=1, rooms=("R1",))])
+    bot.check_once(cfg, state_path=ablauf["pfad"])
+    vorher = ablauf["committed"]
+
+    untis_liefert(ablauf, [lesson(uid=1, rooms=("R2",))])
+    bot.check_once(cfg, state_path=ablauf["pfad"])
+
+    assert len(ablauf["gesendet"]) == 1
+    assert ablauf["committed"] == vorher + 1
 
 
 # ===========================================================================
@@ -3270,7 +3490,9 @@ def test_main_watch_standardwerte(cfg, monkeypatch):
                         lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
                                                           night=n) or 0)
     bot.main(["watch"])
-    assert gesehen == {"minutes": 55, "interval": 300, "night": None}
+    # 330 = 5,5 Stunden, dieselbe Laufzeit wie im Workflow. Ein kuerzerer
+    # Standard hinterliesse nach einem Handstart keinen wartenden Lauf.
+    assert gesehen == {"minutes": 330, "interval": 300, "night": None}
 
 
 def test_main_selftest(cfg, monkeypatch):

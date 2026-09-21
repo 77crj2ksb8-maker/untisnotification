@@ -2,6 +2,77 @@
 
 Das Format folgt lose [Keep a Changelog](https://keepachangelog.com/de/).
 
+## 2.6.0 — 2026-09-21
+
+Ergebnis der zweiten Prüfrunde: zwei Auditoren, zwei Developer. Kein neues
+Verhalten im Bot — diese Version schließt Lücken in den Tests, in der
+Bedienung von Hand und in der Doku.
+
+### Behoben
+
+* **Tests, die grün waren, ohne zu prüfen.** Für jeden Punkt hier ist per
+  Mutationstest belegt, dass die genannte Änderung am Code ihn jetzt rot
+  macht — vorher überlebte sie die komplette Suite:
+
+  | Test | war blind gegen |
+  |---|---|
+  | `test_pair_up_beste_paarung_gewinnt_nicht_die_erste` | entferntes `candidates.sort()` — der schwache Bewerber kam mangels gemeinsamem Raum gar nicht erst über die Schwelle |
+  | `test_unplausibel_wenn_alles_weg` | entfernten `if not new`-Guard — `match="0 Stunden"` passte auch auf „1**0 Stunden**" aus dem Prozent-Zweig |
+  | `test_load_state_verwirft_altes_schema` | ausgeschaltete Schema-Prüfung — es griff in Wahrheit der Fenster-Guard |
+  | die `ablauf`-Fixture | jede teilweise Fensterüberlappung: die Uhr stand fest, also galt in jedem Test `overlap(win, previous.window) == win`. Geprüft war nur der Sonderfall gar keiner Überlappung |
+
+  Die Fixture hält die Uhr jetzt im Protokoll, und zwei neue Tests rollen
+  das Fenster wie im Betrieb weiter: einmal, dass neu hineingerutschte
+  Stunden nicht als „➕ neuer Termin" gemeldet werden (sonst käme jeden
+  Morgen ein kompletter Schultag), und einmal, dass die Plausibilitätsbremse
+  nur die Überlappung misst (sonst schlüge sie täglich an und der Bot
+  meldete dauerhaft nichts mehr).
+
+  Im selben Zug enger gefasst, ohne dass eine Mutation sie überlebt hätte:
+  `test_unplausibel_wenn_grosser_teil_weg` prüfte auf `match="%"` und hätte
+  damit jede beliebige `Implausible`-Meldung durchgewinkt, auch die aus dem
+  Zweig daneben. Jetzt nennt das Muster die Zahlen.
+
+  Dazu vier Zusicherungen, die überhaupt keinen Wächter hatten: der
+  Zustand wird **auch nach dem Melden** committet (sonst holt der nächste
+  Actions-Job einen Checkout mit der alten `state.json` und meldet
+  dieselbe Änderung erneut), eine Teilzustellung gilt als Erfolg,
+  `chronological()` ordnet gleichzeitige Stunden eindeutig, und
+  `_load_dotenv` ignoriert `#KEY=value` — genau die Form, die
+  `.env.example` liefert.
+
+* **Der Standard für einen Handstart war 10 Minuten und riss damit genau
+  die Kette ab, die man von Hand anwirft.** Ein kurzer Lauf endet, ohne
+  einen wartenden Lauf zu hinterlassen; danach steht alles wieder still,
+  bis der Zeitplaner sich erbarmt. Der Standard ist jetzt der volle Lauf
+  (330 Minuten), in der Eingabemaske wie in `bot.py watch`. Wer schnell
+  ein Ergebnis will, nimmt `selftest` oder `testmessage` — beide antworten
+  in Sekunden und haben eine eigene `concurrency`-Gruppe.
+
+* **`selftest` ließ sich nur lokal starten**, obwohl SETUP ihn als
+  Notnagel nennt, wenn nichts ankommt. Er steht jetzt als dritter `modus`
+  in der Eingabemaske.
+
+* **SETUP verlangte `LOOKAHEAD_DAYS` und `TIMEZONE` als Secrets.** Der
+  Workflow setzt beide als Umgebungsvariable, und die gewinnt immer — ein
+  Secret dafür bliebe wirkungslos.
+
+### Geändert
+
+* Die Störmeldung des Wachhunds sagt jetzt **wie** man die Kette wieder
+  anwirft. Wer sie abends auf dem Handy liest, hat kein README zur Hand.
+* `render_plan()` entfernt. Nicht angeschlossen, und `bot.py show` gibt auf
+  dem Terminal ohnehin mehr her.
+* Die Liste der `SICHERHEITSNETZ`-Zusicherungen im README ist vollständig —
+  zwei fehlten, und die Anzahl im Text stimmte seit zwei Versionen nicht.
+  `test_readme_nennt_jedes_sicherheitsnetz` hält sie ab jetzt aktuell:
+  ein neues Netz ohne Zeile in der Tabelle macht die Suite rot, eine
+  verwaiste Zeile ebenso.
+* SETUP nennt den Verbrauch an Actions-Minuten realistisch: im
+  Dauerbetrieb über 40.000 im Monat, nicht „ein paar tausend".
+* `LOG_LEVEL` steht jetzt in der Einstellungstabelle des README.
+* Toter `per-file-ignores`-Block aus `pyproject.toml` entfernt.
+
 ## 2.5.0 — 2026-09-21
 
 ### Behoben

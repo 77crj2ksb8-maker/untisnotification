@@ -37,20 +37,28 @@ on:
   workflow_dispatch:
     inputs:
       modus:
-        description: "watch = normal ueberwachen, testmessage = einmalige Beispielnachricht"
+        description: "watch = Laufkette anwerfen, selftest = jeden Zugang einzeln pruefen, testmessage = Beispielnachricht"
         required: false
         default: "watch"
         type: choice
         options:
           - watch
+          - selftest
           - testmessage
       minuten:
-        description: "Wie lange dieser Lauf ueberwachen soll (nur bei modus=watch)"
+        description: "Nur bei modus=watch. 330 haelt die Laufkette am Leben; kuerzer ist ein Einzeltest, nach dem die Kette wieder steht."
         required: false
-        default: "10"
-      # Der Standard ist bewusst kurz: Ein von Hand gestarteter Lauf soll
-      # schnell ein Ergebnis zeigen und nicht stundenlang den Platz in der
-      # concurrency-Gruppe blockieren.
+        default: "330"
+      # Der Standard ist bewusst der VOLLE Lauf, obwohl hier frueher 10
+      # stand. Von Hand gestartet wird dieser Workflow vor allem in einem
+      # Fall: Die Kette ist abgerissen und muss neu anlaufen. Ein
+      # 10-Minuten-Lauf endet aber, ohne einen wartenden Lauf zu
+      # hinterlassen -- danach steht die Kette wieder, und zwar bis der
+      # Zeitplaner sich von selbst erbarmt.
+      #
+      # Der alte Zweck des kurzen Standards, schnell ein Ergebnis sehen,
+      # ist besser bedient: modus=selftest und modus=testmessage antworten
+      # in Sekunden und haben eine eigene concurrency-Gruppe.
 
 permissions:
   contents: write        # noetig, um state.json zurueckzuschreiben
@@ -60,9 +68,10 @@ concurrency:
   # sorgt dafuer, dass immer genau ein Lauf laeuft und genau einer bereit
   # steht, der nahtlos uebernimmt.
   #
-  # Die Testnachricht bekommt eine eigene Gruppe. Sonst muesste sie hinter
-  # einem laufenden watch warten -- und das dauert jetzt bis zu 5,5 Stunden.
-  # Geplante Laeufe setzen keine Inputs, landen also in "untisbot-watch".
+  # Testnachricht und selftest bekommen je eine eigene Gruppe -- der Modus
+  # steht im Gruppennamen. Sonst muessten sie hinter einem laufenden watch
+  # warten, und das dauert jetzt bis zu 5,5 Stunden. Geplante Laeufe setzen
+  # keine Inputs, landen also in "untisbot-watch".
   group: untisbot-${{ github.event.inputs.modus || 'watch' }}
   # Niemals abbrechen: Ein laufender Check darf nicht mitten im Versand
   # gekappt werden.
@@ -117,17 +126,28 @@ jobs:
           LOOKAHEAD_DAYS: "7"
           TIMEZONE: "Europe/Berlin"
         run: |
-          if [ "${{ github.event.inputs.modus }}" = "testmessage" ]; then
-            # Kein git config noetig: testmessage schreibt keinen Zustand.
-            python bot.py testmessage
-          else
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            python bot.py watch \
-              --minutes "${{ github.event.inputs.minuten || '330' }}" \
-              --interval 300 \
-              --night-interval 1800
-          fi
+          case "${{ github.event.inputs.modus }}" in
+            selftest)
+              # Kein git config noetig: selftest schreibt nichts, weder
+              # Zustand noch Commit.
+              python bot.py selftest
+              ;;
+            testmessage)
+              # Kein git config noetig: testmessage schreibt keinen Zustand.
+              python bot.py testmessage
+              ;;
+            *)
+              # Auch der Zweig fuer geplante Laeufe: Die setzen gar keine
+              # Inputs, modus ist dann leer. Deshalb hier der Rueckfall auf
+              # 330 -- ohne ihn liefe ein Cron-Lauf mit leerem --minutes.
+              git config user.name  "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              python bot.py watch \
+                --minutes "${{ github.event.inputs.minuten || '330' }}" \
+                --interval 300 \
+                --night-interval 1800
+              ;;
+          esac
 
       # Meldet sich selbst, statt darauf zu hoffen, dass jemand in den
       # Actions-Tab schaut. Greift bei allem, was den Lauf scheitern

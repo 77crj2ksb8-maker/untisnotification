@@ -41,8 +41,3 @@ ignore = [
     # auf einer dreizeiligen Fake-Klasse ist mehr Zeremonie als Nutzen.
     "RUF012",
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# tests/ setzt sys.path, bevor bot importiert wird -- der Import MUSS danach
-# stehen. Die betroffenen Zeilen tragen ein eigenes noqa.
-"tests/*" = []

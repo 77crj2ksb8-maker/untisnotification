@@ -71,8 +71,19 @@ jobs:
           # nahtlos uebernehmen; 480 Minuten lassen also reichlich Luft,
           # bevor von einem echten Stillstand auszugehen ist.
           if [ "$alter" -gt 480 ]; then
-            python bot.py alert \
+            # Der Hinweis gehoert in die Meldung selbst. Wer sie abends auf
+            # dem Handy liest, hat weder README noch SETUP zur Hand -- und
+            # ohne Handstart wartet die Kette darauf, dass der Zeitplaner
+            # sich von selbst erbarmt.
+            #
+            # Die Leerzeile kommt aus printf, nicht aus dem YAML: Eine echte
+            # Leerzeile im Text wuerde hier den Block-Skalar beenden, und
+            # zwar lautlos -- YAML liest den Rest dann als neuen Schluessel.
+            meldung=$(printf '%s\n\n%s' \
               "Seit $alter Minuten hat kein Überwachungslauf mehr begonnen. Die Laufkette ist abgerissen — Stundenplanänderungen werden gerade nicht gemeldet." \
+              "Wieder anwerfen: Actions → „Stundenplan pruefen“ → Run workflow, modus auf watch lassen und minuten nicht anfassen.")
+
+            python bot.py alert "$meldung" \
               --quelle "Wachhund · $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions"
           else
             echo "Alles in Ordnung."

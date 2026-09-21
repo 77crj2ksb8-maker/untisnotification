@@ -59,9 +59,9 @@ Danach, und das ist wichtig:
    Ohne die Datei ist der erste Lauf sauber ein „Erster Lauf: N Stunden
    gemerkt, nichts gesendet".
 2. **Repo auf public lassen.** Public heißt unbegrenzte Actions-Minuten. Ein
-   Lauf dauert rund 50 Minuten; bei ein paar Läufen am Tag sind das mehrere
-   tausend Minuten im Monat, während im Free-Tarif für private Repos 2.000
-   enthalten sind. Privat reicht nicht.
+   Lauf dauert 5,5 Stunden, und die Läufe lösen einander ab — im Dauerbetrieb
+   sind das über 40.000 Minuten im Monat, während im Free-Tarif für private
+   Repos 2.000 enthalten sind. Privat reicht nicht.
 3. Unter *Actions* einmal bestätigen, dass Workflows laufen dürfen. **Bei
    Forks sind geplante Workflows standardmäßig aus** und müssen dort
    eingeschaltet werden.
@@ -84,9 +84,12 @@ Sechs Pflichtwerte:
 | `WEBUNTIS_USERNAME` | `max.mustermann` |
 | `WEBUNTIS_PASSWORD` | dein Passwort |
 
-Optional sind `WEBUNTIS_KLASSE`, `LOOKAHEAD_DAYS` und `TIMEZONE` — siehe
-[README](README.md#einstellungen). `LOOKAHEAD_DAYS` und `TIMEZONE` stehen fest
-im Workflow und können dort direkt geändert werden.
+Optional ist `WEBUNTIS_KLASSE` — siehe [README](README.md#einstellungen).
+
+`LOOKAHEAD_DAYS` und `TIMEZONE` gehören **nicht** hierher. Der Workflow setzt
+beide direkt als Umgebungsvariable, und die gewinnt immer gegen ein Secret
+gleichen Namens — ein Secret dafür bliebe also wirkungslos. Wer die Werte
+ändern will, ändert sie in `.github/workflows/check-timetable.yml`.
 
 ## 5. Ausprobieren
 
@@ -111,8 +114,11 @@ statt Stundennummern und fasst keine Doppelstunden zusammen.
 > Überwachung statt als Testnachricht — kein Schaden, nur nicht das, was du
 > wolltest.
 
-Kommt nichts an, lauf lokal `python bot.py selftest` (siehe unten) — der prüft
-jeden Zugang einzeln und sagt genau, welcher klemmt.
+Kommt nichts an: *Run workflow* noch einmal, diesmal mit **modus** `selftest`.
+Der prüft Token, jede Chat-ID und WebUntis **einzeln** und schreibt in die
+Lauf-Ausgabe, welcher Zugang klemmt. Er ändert nichts — kein Zustand, kein
+Commit, keine Nachricht. Wer den Bot ohnehin lokal ausgecheckt hat, bekommt
+mit `python bot.py selftest` dieselbe Ausgabe (siehe unten).
 
 Danach läuft der Bot von allein — rund um die Uhr. Der Zeitplaner stößt die
 Kette an, jeder Lauf überwacht 5,5 Stunden und der nächste steht schon bereit.
