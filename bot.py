@@ -34,6 +34,7 @@ import html
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -55,10 +56,18 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
+
+#: Obergrenze fuer jede Netzverbindung ohne eigenes Zeitlimit -- in der
+#: Praxis die WebUntis-Aufrufe. Die webuntis-Bibliothek setzt selbst keines,
+#: ein Server, der die Verbindung annimmt und dann schweigt, wuerde den Lauf
+#: sonst bis zum Job-Limit blockieren: seit den 5,5-Stunden-Laeufen ein
+#: halber Tag Blindflug ohne eine einzige Fehlermeldung.
+#: Der Telegram-Pfad hat sein eigenes, kuerzeres Limit (TIMEOUT).
+NETWORK_TIMEOUT = 30
 
 #: Format-Version des gespeicherten Zustands. Passt sie nicht, wird der
 #: alte Zustand verworfen statt falsch gedeutet.
@@ -158,6 +167,17 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def enforce_network_timeout(seconds: int = NETWORK_TIMEOUT) -> None:
+    """Deckelt Verbindungen, die kein eigenes Zeitlimit mitbringen.
+
+    Wirkt ueber den Standard-Socket-Timeout, weil die webuntis-Bibliothek
+    keinen Weg anbietet, ihren Aufrufen eines mitzugeben. Ein ausdruecklich
+    gesetztes Limit -- etwa das von requests im Telegram-Pfad -- gewinnt
+    weiterhin.
+    """
+    socket.setdefaulttimeout(seconds)
+
+
 def mask(secret: str | None) -> str:
     """Kuerzt ein Geheimnis fuer die Log-Ausgabe."""
     if not secret:
@@ -251,6 +271,20 @@ class Lesson:
         data = {k: v for k, v in raw.items() if k in fields}
         for name in ("subjects", "teachers", "rooms"):
             data[name] = tuple(data.get(name) or ())
+
+        # Das Datum einmal probeweise parsen. Ohne diese Zeile winkt
+        # from_json jeden Unsinn durch -- ein deutsches Datum, eine Zahl,
+        # ein leerer String -- und er faellt erst spaeter in within() oder
+        # period_index() auf die Fuesse, ausserhalb jeder Absicherung.
+        # Hier dagegen faengt ihn der Aufrufer in load_state ab und
+        # ueberspringt den Eintrag, so wie es der Kommentar dort verspricht.
+        #
+        # Bewusst OHNE str(): Die Zahl 20260914 waere als Zeichenkette ein
+        # gueltiges ISO-Datum, bliebe im Feld aber eine Zahl -- und Lesson.day
+        # stuerzte spaeter doch ab. fromisoformat() lehnt alles ab, was keine
+        # Zeichenkette ist, mit einem TypeError, den load_state mitfaengt.
+        dt.date.fromisoformat(data.get("date"))
+
         return Lesson(**data)
 
 
@@ -2178,6 +2212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ein LOG_LEVEL-Eintrag aus der Datei nicht.
     _load_dotenv(BASE_DIR / ".env")
     setup_logging(args.log or os.environ.get("LOG_LEVEL", "INFO"))
+    enforce_network_timeout()
 
     command = args.command or "check"
 

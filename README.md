@@ -161,7 +161,7 @@ gespeicherten Zustand meldet nichts, er merkt sich nur neu.
 
 ```
 bot.py                              der ganze Bot
-tests/test_bot.py                   403 Tests, ohne Netz lauffähig
+tests/test_bot.py                   411 Tests, ohne Netz lauffähig
 pyproject.toml                      Einstellungen für pytest und ruff
 requirements.txt                    Abhängigkeiten
 .env.example                        Vorlage für die lokale Entwicklung
@@ -199,7 +199,7 @@ Logging statt Weiterreichen.
 ```bash
 pip install -r requirements.txt
 
-python -m pytest             # 403 Tests, keine Netzverbindung nötig
+python -m pytest             # 411 Tests, keine Netzverbindung nötig
 ruff check .                 # Linter
 ```
 

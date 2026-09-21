@@ -79,6 +79,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ohne diesen Schritt meldet die Laufkette Aenderungen doppelt.
+      #
+      # actions/checkout holt nicht den aktuellen Branch-Kopf, sondern den
+      # SHA von dem Moment, in dem der Lauf AUSGELOEST wurde. Ein wartender
+      # Lauf kann aber Stunden spaeter uebernehmen -- er bekaeme dann eine
+      # state.json von vor dem Lauf, der gerade geendet hat, und meldete
+      # dessen Aenderungen ein zweites Mal. Sein Push waere ausserdem
+      # dauerhaft abgelehnt, weil er auf veralteter Basis committet.
+      #
+      # Nachgewiesen an der echten Historie: Lauf 19 lief auf fec69f6 und
+      # erzeugte 4636fc2; Lauf 20 zwei Minuten spaeter bekam 4636fc2. Der
+      # SHA ist also je Lauf eingefroren.
+      - name: Auf den aktuellen Stand bringen
+        run: |
+          git fetch --quiet origin "${{ github.ref_name }}"
+          git reset --quiet --hard "origin/${{ github.ref_name }}"
+          echo "Stand: $(git rev-parse --short HEAD)"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

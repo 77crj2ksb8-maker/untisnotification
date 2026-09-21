@@ -2,6 +2,47 @@
 
 Das Format folgt lose [Keep a Changelog](https://keepachangelog.com/de/).
 
+## 2.4.0 — 2026-09-21
+
+Aus einem Audit-Durchgang. Der erste Punkt behebt einen Fehler, den erst
+der Dauerbetrieb aus 2.2.0 gefährlich gemacht hat.
+
+### Behoben
+
+* **Die Laufkette meldete Änderungen doppelt.** `actions/checkout` holt
+  nicht den aktuellen Branch-Kopf, sondern den SHA vom Moment der
+  *Auslösung*. Ein wartender Lauf übernimmt aber bis zu 5,5 Stunden
+  später — und bekam damit eine veraltete `state.json`, meldete die
+  Änderungen des gerade beendeten Laufs erneut und konnte seinen eigenen
+  Stand nie pushen (der Rebase kollidiert zwangsläufig, weil beide Seiten
+  dieselbe `saved_at`-Zeile neu schreiben). Der Lauf gleicht sich jetzt vor
+  dem Start auf den echten Branch-Kopf ab.
+
+  Belegt an der Historie: Lauf 19 lief auf `fec69f6` und erzeugte
+  `4636fc2`; Lauf 20 zwei Minuten später bekam `4636fc2`. Der SHA ist je
+  Lauf eingefroren.
+
+* **WebUntis-Aufrufe hatten kein Zeitlimit.** Die `webuntis`-Bibliothek
+  setzt keines. Ein Server, der die Verbindung annimmt und dann schweigt,
+  blockierte den Lauf bis zum Job-Limit — seit 2.2.0 also 5,5 Stunden
+  Blindflug, ohne Fehlschlag, ohne Meldung. Jetzt gedeckelt auf 30
+  Sekunden (`NETWORK_TIMEOUT`).
+
+* **`Lesson.from_json` winkte kaputte Datumswerte durch.** Ein deutsches
+  Datum, eine Zahl oder ein leerer String kamen durch und stürzten erst
+  später in `within()` ab — außerhalb jeder Absicherung, und bei jedem
+  weiteren Lauf identisch, weil `state.json` im Repo liegt. Das Datum wird
+  jetzt beim Laden probeweise geparst, damit `load_state` den Eintrag
+  überspringen kann, wie sein Kommentar es verspricht.
+
+  Ausdrücklich ohne `str()`: Die Zahl `20260914` wäre als Zeichenkette ein
+  gültiges ISO-Datum, bliebe im Feld aber eine Zahl — und `Lesson.day`
+  stürzte doch ab. Das ist beim Testen des eigenen Fixes aufgefallen.
+
+### Sonstiges
+
+* Testsuite: 403 → 411 Tests.
+
 ## 2.3.0 — 2026-09-21
 
 ### Neu

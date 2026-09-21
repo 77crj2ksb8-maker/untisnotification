@@ -233,6 +233,29 @@ def test_mask(secret, erwartet):
     assert bot.mask(secret) == erwartet
 
 
+def test_enforce_network_timeout_setzt_grenze():
+    """SICHERHEITSNETZ: Die webuntis-Bibliothek setzt selbst kein Zeitlimit.
+    Ein Server, der annimmt und dann schweigt, wuerde den Lauf sonst bis
+    zum Job-Limit blockieren -- 5,5 Stunden Blindflug ohne Fehlermeldung."""
+    import socket
+    vorher = socket.getdefaulttimeout()
+    try:
+        bot.enforce_network_timeout(17)
+        assert socket.getdefaulttimeout() == 17
+    finally:
+        socket.setdefaulttimeout(vorher)
+
+
+def test_enforce_network_timeout_standardwert():
+    import socket
+    vorher = socket.getdefaulttimeout()
+    try:
+        bot.enforce_network_timeout()
+        assert socket.getdefaulttimeout() == bot.NETWORK_TIMEOUT
+    finally:
+        socket.setdefaulttimeout(vorher)
+
+
 def test_now_local_faellt_bei_kaputter_zone_zurueck():
     assert isinstance(bot.now_local("Gibt/EsNicht"), dt.datetime)
 
@@ -327,6 +350,46 @@ def test_from_json_mit_null_listen():
     roh = lesson().to_json()
     roh["teachers"] = None
     assert Lesson.from_json(roh).teachers == ()
+
+
+@pytest.mark.parametrize("kaputtes_datum", [
+    "14.09.2026",      # deutsches Format
+    "",                # leer
+    20260914,          # Zahl statt Zeichenkette
+    "2026-13-45",      # gibt es nicht
+])
+def test_from_json_weist_kaputtes_datum_ab(kaputtes_datum):
+    """SICHERHEITSNETZ: Ohne diese Pruefung winkt from_json den Eintrag
+    durch, und er fliegt erst spaeter in within() oder period_index() um
+    die Ohren -- dort faengt ihn niemand mehr ab, und jeder weitere Lauf
+    scheitert identisch, weil state.json im Repo liegt."""
+    roh = lesson().to_json()
+    roh["date"] = kaputtes_datum
+    with pytest.raises((ValueError, TypeError)):
+        Lesson.from_json(roh)
+
+
+def test_load_state_ueberspringt_kaputtes_datum(tmp_path):
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson(uid=1), lesson(uid=2, start="08:30")], FENSTER, pfad)
+    daten = json.loads(pfad.read_text(encoding="utf-8"))
+    daten["lessons"][0]["date"] = "14.09.2026"
+    pfad.write_text(json.dumps(daten), encoding="utf-8")
+
+    zustand = bot.load_state(pfad)
+    assert len(zustand.lessons) == 1
+
+
+def test_within_ueberlebt_geladenen_zustand(tmp_path):
+    """Der eigentliche Schaden: within() stuerzte am kaputten Datum ab."""
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson(uid=1), lesson(uid=2, start="08:30")], FENSTER, pfad)
+    daten = json.loads(pfad.read_text(encoding="utf-8"))
+    daten["lessons"][0]["date"] = ""
+    pfad.write_text(json.dumps(daten), encoding="utf-8")
+
+    zustand = bot.load_state(pfad)
+    assert len(bot.within(zustand.lessons, FENSTER)) == 1
 
 
 def test_from_json_sortiert_ebenfalls():
