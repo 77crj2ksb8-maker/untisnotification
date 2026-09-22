@@ -19,18 +19,6 @@ Montag, 14.09. (heute)
     R301 → Labor
 ```
 
-[Was der Bot kann](#was-der-bot-kann) ·
-[Einrichten](#einrichten) ·
-[Befehle](#befehle) ·
-[Einstellungen](#einstellungen) ·
-[Lokal ausführen](#lokal-ausführen) ·
-[Wie es läuft](#wie-es-läuft) ·
-[Wenn etwas schiefgeht](#wenn-etwas-schiefgeht) ·
-[`state.json` ist öffentlich](#achtung-statejson-ist-öffentlich-lesbar) ·
-[Aufbau](#aufbau) ·
-[Entwicklung](#entwicklung) ·
-[Nutzungsrechte](#nutzungsrechte)
-
 ## Was der Bot kann
 
 * **Doppelstunden zusammenfassen** — „1./2. Stunde" statt zweier wortgleicher

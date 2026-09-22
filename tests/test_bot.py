@@ -189,6 +189,59 @@ def sicherheitsnetze() -> set[str]:
     return treffer
 
 
+#: Zahlwoerter, weil der Einleitungssatz im README einen Satz bildet und
+#: keine Tabelle ist. Mehr als zwanzig Dateien will dieses Projekt nicht.
+ZAHLWORT = {
+    "Eine": 1, "Zwei": 2, "Drei": 3, "Vier": 4, "Fuenf": 5, "Fünf": 5,
+    "Sechs": 6, "Sieben": 7, "Acht": 8, "Neun": 9, "Zehn": 10, "Elf": 11,
+    "Zwoelf": 12, "Zwölf": 12, "Dreizehn": 13, "Vierzehn": 14,
+    "Fuenfzehn": 15, "Fünfzehn": 15, "Sechzehn": 16, "Siebzehn": 17,
+    "Achtzehn": 18, "Neunzehn": 19, "Zwanzig": 20,
+}
+
+
+def readme_dateiliste() -> tuple[int, set[str]]:
+    """Die Zahl aus dem Einleitungssatz und die Namen aus dem Block darunter."""
+    text = (Path(__file__).resolve().parent.parent
+            / "README.md").read_text(encoding="utf-8")
+    muster = (r"^(\w+) Dateien, und jede hat genau eine Aufgabe:"
+              r"\s*\n+```\n(.*?)\n```")
+    kopf = re.search(muster, text, re.MULTILINE | re.DOTALL)
+    assert kopf, "Der Aufbau-Block im README sieht nicht mehr aus wie erwartet"
+    zahl = ZAHLWORT[kopf.group(1)]
+    namen = {zeile.split()[0] for zeile in kopf.group(2).splitlines() if zeile.strip()}
+    return zahl, namen
+
+
+def test_readme_listet_genau_die_versionierten_dateien():
+    """Die README behauptet "Elf Dateien, und jede hat genau eine Aufgabe"
+    und zaehlt sie auf. Das ist -- anders als die SICHERHEITSNETZ-Tabelle
+    daneben -- reine Behauptung: Wer eine Datei anlegt oder loescht, merkt
+    nichts davon.
+
+    Die README begruendet die Tabellenpruefung selbst mit "eine Doku wird
+    nicht ausgefuehrt, also wird sie hier ausgefuehrt". Derselbe Satz gilt
+    fuer die Dateiliste, und genau hier wurde er bisher nicht angewandt.
+
+    Geprueft wird in beide Richtungen plus die Zahl im Satz -- eine
+    Dateiliste, die zwar stimmt, aber mit "Zehn Dateien" eingeleitet
+    wird, ist genauso falsch.
+
+    Mutationstest: eine Zeile aus dem Aufbau-Block des README entfernen
+    -> dieser Test muss rot werden.
+    """
+    zahl, genannt = readme_dateiliste()
+    fertig = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+                            cwd=Path(__file__).resolve().parent.parent)
+    assert fertig.returncode == 0, "git ls-files nicht ausfuehrbar"
+    versioniert = {z for z in fertig.stdout.split() if z}
+
+    assert versioniert - genannt == set(), "versioniert, aber nicht im README genannt"
+    assert genannt - versioniert == set(), "im README genannt, aber nicht versioniert"
+    assert zahl == len(versioniert), (
+        f"Der Einleitungssatz nennt {zahl}, versioniert sind {len(versioniert)}")
+
+
 def test_readme_nennt_jedes_sicherheitsnetz():
     """Die README fuehrt die Zusicherungen als Tabelle -- und behauptet, das
     seien alle. Zweimal stimmte das nicht: Erst blieb die Anzahl im Text

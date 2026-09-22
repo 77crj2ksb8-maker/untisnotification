@@ -1,17 +1,11 @@
 name: Wachhund
 
-# Den einen Fall deckt die Stoermeldung im Hauptworkflow NICHT ab: Es laeuft
-# ueberhaupt nichts mehr. Ein Job, der nie startet, kann sich auch nicht
-# beschweren. Genau das ist hier schon passiert -- die Laufkette stand drei
-# Tage still, aufgefallen ist es nur durch zufaelliges Nachsehen.
+# WARUM ES DIESEN WORKFLOW GIBT -- ein Job, der nie startet, kann sich auch
+# nicht beschweren; und warum der Wachhund an derselben Cron-Mechanik haengt,
+# die er bewacht: README.md, Abschnitt "Wenn etwas schiefgeht".
 #
-# Dieser Workflow schaut deshalb von aussen nach, wann der letzte
-# Ueberwachungslauf begonnen hat, und meldet sich, wenn es zu lange her ist.
-#
-# Die Grenze ist ehrlich zu benennen: Der Wachhund haengt an derselben
-# unzuverlaessigen Cron-Mechanik wie alles andere. Loest GitHub gar nichts
-# mehr aus, schweigt auch er. Er faengt den haeufigeren Fall ab -- die Kette
-# reisst, waehrend der Rest von GitHub weiterlaeuft.
+# Was hier bleibt, ist die Mechanik: wie er das Lebenszeichen ermittelt und
+# warum die Abfrage genau so aussieht.
 
 on:
   schedule:

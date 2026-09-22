@@ -1,32 +1,11 @@
 name: Stundenplan pruefen
 
-# Warum diese Konstruktion? Ziel ist Dauerbetrieb rund um die Uhr.
-#
-# Zwei Dinge stehen dem im Weg:
-#
-#   1. GitHubs Zeitplaner haelt kurze Intervalle nicht ein. Ein "alle 30
-#      Minuten" wird verzoegert, gebuendelt oder ganz verworfen -- gemessen
-#      kamen an einem Werktag rund 10 von 48 moeglichen Ausloesungen an.
-#   2. Ein einzelner Actions-Job darf hoechstens 6 Stunden laufen. Ein
-#      Dauerprozess ist also gar nicht moeglich.
-#
-# Die Loesung ist eine Kette statt eines Dauerlaufs, und sie beruht auf
-# einer Eigenschaft der concurrency-Gruppe: Trifft ein neuer Lauf ein,
-# waehrend einer laeuft, wird er NICHT verworfen, sondern wartet. Ein
-# bereits wartender Lauf wird dabei durch den neueren ersetzt, es steht
-# also immer genau einer bereit. Endet der laufende, startet der wartende
-# im selben Moment.
-#
-# Damit gilt: Solange der Zeitplaner innerhalb von 5,5 Stunden auch nur ein
-# einziges Mal ausloest, reisst die Kette nicht ab. Bei rund 10 Ausloesungen
-# pro Tag ist das reichlich Sicherheitsabstand.
-#
-# Den Takt innerhalb eines Laufs macht der Bot selbst: alle 5 Minuten in der
-# Schulzeit, alle 30 Minuten sonst. Nachts im Fuenfminutentakt zu fragen
-# waere sinnlose Last -- siehe interval_for() in bot.py.
-#
-# Das Repo ist oeffentlich und hat damit unbegrenzte Actions-Minuten. Der
-# Dauerbetrieb kostet nichts.
+# WARUM DIE KETTE SO AUSSIEHT -- der unzuverlaessige Zeitplaner, die
+# 6-Stunden-Grenze eines Jobs und die concurrency-Gruppe, die beides
+# ueberbrueckt: README.md, Abschnitt "Wie es laeuft". Dort steht die
+# Begruendung samt Diagramm und den gemessenen Zahlen, und sie steht nur
+# dort. Hier bleiben ausschliesslich die Kommentare, die an genau der
+# Zeile haengen, die sie absichern.
 
 on:
   schedule:
@@ -178,12 +157,5 @@ jobs:
             "Der Überwachungslauf ist fehlgeschlagen. Bis zur Behebung werden keine Stundenplanänderungen gemeldet." \
             --quelle "Lauf ${{ github.run_number }} · ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-# Hinweis: GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein
-# Commit im Repo passiert -- etwa ueber die Sommerferien. Da der Bot seinen
-# Zustand selbst committet, tritt das im laufenden Betrieb nicht ein. Nach
-# einer langen Pause einmal im Actions-Tab "Enable workflow" klicken.
-#
-# In der Lauf-Liste tauchen regelmaessig abgebrochene ("cancelled") Eintraege
-# auf. Das ist kein Fehler: Es sind die wartenden Laeufe, die von einem
-# neueren wartenden ersetzt wurden -- genau das Verhalten, auf dem die Kette
-# beruht.
+# Abgeschaltete Workflows nach 60 Tagen ohne Commit, abgebrochene Laeufe in
+# der Liste: README.md, "Bekannte Eigenheiten" und "Wie es laeuft".
