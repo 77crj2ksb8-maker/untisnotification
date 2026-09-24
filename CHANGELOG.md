@@ -1,8 +1,33 @@
 # Änderungen
 
-Kurzfassung, ein Absatz je Version. **Die ausführliche Fassung steht in
-`git log`** — dort auch die Mutationsproben, die Messreihen und die
-Begründungen, warum etwas *nicht* gemacht wurde.
+Kurzfassung, ein Absatz je Version. **Die ausführliche Fassung steht in den
+Commit-Nachrichten des Original-Repos**
+(<https://github.com/77crj2ksb8-maker/untisnotification/commits/main>) — dort
+auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
+*nicht* gemacht wurde. Bewusst die URL und nicht `git log`: Ein Repo, das
+über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
+diese Historie nicht.
+
+## 2.8.1 — 2026-09-24
+
+Korrekturen aus einem Code-Review von 2.8.0.
+
+* **Der neue Dateilisten-Test brach die eigene Einrichtungsanleitung.** Wer
+  `state.json` löschte — wie das README es für neue Repos verlangt —, bekam
+  einen dauerhaft roten Test, denn das README nennt die Datei weiter. Dateien,
+  die der Bot zur Laufzeit selbst anlegt, dürfen jetzt fehlen. Außerdem fällt
+  eine doppelte Zeile im Block auf, die Zahl im Einleitungssatz ist eine
+  Ziffer und wird gegen die Zeilen des Blocks geprüft, Dateinamen mit
+  Leerzeichen oder Umlauten werden korrekt gelesen, und ohne git-Arbeitsbaum
+  (etwa nach einem ZIP-Download) wird der Test übersprungen statt rot.
+* **Die Größenangabe im 2.8.0-Eintrag war falsch** — „auf ein Drittel" stimmte
+  weder für die Datei noch für die alten Einträge. Korrigiert auf gemessene
+  Werte.
+* Zwei Verweise auf einen Kopfkommentar, den 2.8.0 durch einen README-Zeiger
+  ersetzt hatte, zeigen jetzt direkt aufs README. Der CHANGELOG-Kopf verweist
+  auf die Commit-Historie des Original-Repos statt auf `git log`, die ein über
+  „Use this template" angelegtes Repo nicht hat. Der 2.7.0-Eintrag nennt
+  wieder beide Gründe für den getrennten Wachhund.
 
 ## 2.8.0 — 2026-09-22
 
@@ -10,7 +35,9 @@ Verdichtungsrunde. Kein Verhalten geändert, keine Datei entfernt — die
 Redundanz saß nicht in der Dateiliste, sondern im Fließtext: 29 % des Repos
 waren Prosa, vieles davon in zweiter und dritter Fassung.
 
-* **Dieser CHANGELOG ist auf ein Drittel eingedampft** (17 → 6,6 kB). Die
+* **Dieser CHANGELOG ist eingedampft:** Die Einträge 2.0 bis 2.7.0 schrumpften
+  von 16.969 auf 6.641 Bytes (39 %), mit dem 2.8.0-Eintrag hatte die Datei
+  8.649 Bytes (51 %). Die
   sieben Versions-Commits tragen zusammen mehr Text als die Langfassung hier;
   gestrichen wurde nur, was dort vollständiger steht. Nicht gelöscht wurde die
   Datei: Wer dem README folgt und über „Use this template" einrichtet, bekommt
@@ -40,8 +67,11 @@ des Repos, und kein Test bewacht diese Datei).
 ## 2.7.0 — 2026-09-21
 
 Vierzehn Dateien wurden elf: `SETUP.md`, `COPYRIGHT` und `.env.example` gingen
-im README auf. Die drei Workflows blieben getrennt — ein einverleibter
-Wachhund- oder Test-Lauf käme in die `concurrency`-Gruppe der Laufkette und
+im README auf. Die drei Workflows blieben getrennt, aus zwei verschiedenen
+Gründen: Der Wachhund fragt ab, wann der letzte Lauf *dieses* Workflows begann
+— in derselben Datei zählte er seine eigenen Läufe als Lebenszeichen und
+meldete „alles in Ordnung", während die Kette tot ist. Ein einverleibter
+Test-Lauf dagegen käme in die `concurrency`-Gruppe der Laufkette und
 verdrängte dort den wartenden Nachfolger.
 
 * **Ein gescheitertes `git fetch` blieb folgenlos.** Ohne `set -e` liefe der Job
@@ -147,8 +177,8 @@ Zugangsdaten, Linter und Tests bei jedem Push.
 * **Der Telegram-Token konnte in Fehlermeldungen landen.** `requests` nennt bei
   Netzwerkfehlern die vollständige URL, und die enthält den Token; die Meldung
   wurde bis in die Job-Ausgabe durchgereicht. Token werden jetzt herausgefiltert.
-* Bei zwei gleichzeitigen Stunden hing die Reihenfolge davon ab, wie WebUntis
-  gerade auslieferte.
+* `render_plan` sortierte nur nach Tag und Uhrzeit — bei zwei gleichzeitigen
+  Stunden hing die Reihenfolge davon ab, wie WebUntis gerade auslieferte.
 
 ## 2.0
 

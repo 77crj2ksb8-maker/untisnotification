@@ -57,7 +57,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.8.0"
+VERSION = "2.8.1"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -2440,7 +2440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p_watch = sub.add_parser("watch", help="laenger pruefen, in festem Takt")
     # 330 Minuten = 5,5 Stunden: die Laufzeit, auf die die Laufkette
-    # ausgelegt ist (siehe Kopfkommentar in check-timetable.yml). Ein
+    # ausgelegt ist (siehe README.md, Abschnitt „Wie es läuft"). Ein
     # kuerzerer Lauf endet, ohne einen wartenden zu hinterlassen.
     p_watch.add_argument("--minutes", type=int, default=330)
     p_watch.add_argument("--interval", type=int, default=300,

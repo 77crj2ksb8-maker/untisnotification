@@ -375,7 +375,7 @@ Secret dafür ist ohnehin schon da.
 
 ## Aufbau
 
-Elf Dateien, und jede hat genau eine Aufgabe:
+Das Repo besteht aus 11 Dateien, und jede hat genau eine Aufgabe:
 
 ```
 bot.py                                 der ganze Bot
@@ -399,9 +399,10 @@ Bedeutungen von „rot":
   begann. Läge er in derselben Datei, zählte er seine eigenen Läufe als
   Lebenszeichen und meldete „alles in Ordnung", während die Kette längst tot
   ist. Er braucht außerdem `actions: read`, die Kette `contents: write`.
-* Die **Tests** hängen an der workflow-weiten `concurrency` der Kette, wenn
-  sie in deren Datei stünden — ein Push müsste dann bis zu 5,5 Stunden auf
-  seine Prüfung warten.
+* Die **Tests** hingen in derselben Datei an der workflow-weiten
+  `concurrency` der Kette. Schlimmer als die Wartezeit von bis zu 5,5
+  Stunden: Ein Push-Lauf in dieser Gruppe ersetzte den wartenden Kettenlauf
+  — jeder Push kostete dann ein ganzes Glied der Laufkette.
 
 Der Bot selbst ist dagegen **eine** Datei. Auch das ist Absicht: Das Projekt
 ist klein genug, und beim Einspielen über die GitHub-Weboberfläche ist eine

@@ -120,8 +120,11 @@ def _leerer_timegrid_cache():
 #  Workflows
 # ===========================================================================
 
-WORKFLOWS = sorted((Path(__file__).resolve().parent.parent
-                    / ".github" / "workflows").glob("*.yml"))
+#: Das Repo-Verzeichnis. Einmal hier, statt in jedem Test neu berechnet --
+#: sonst muss ein Umzug dieser Datei an vier Stellen nachgezogen werden.
+WURZEL = Path(__file__).resolve().parent.parent
+
+WORKFLOWS = sorted((WURZEL / ".github" / "workflows").glob("*.yml"))
 
 
 def run_bloecke():
@@ -189,57 +192,77 @@ def sicherheitsnetze() -> set[str]:
     return treffer
 
 
-#: Zahlwoerter, weil der Einleitungssatz im README einen Satz bildet und
-#: keine Tabelle ist. Mehr als zwanzig Dateien will dieses Projekt nicht.
-ZAHLWORT = {
-    "Eine": 1, "Zwei": 2, "Drei": 3, "Vier": 4, "Fuenf": 5, "Fünf": 5,
-    "Sechs": 6, "Sieben": 7, "Acht": 8, "Neun": 9, "Zehn": 10, "Elf": 11,
-    "Zwoelf": 12, "Zwölf": 12, "Dreizehn": 13, "Vierzehn": 14,
-    "Fuenfzehn": 15, "Fünfzehn": 15, "Sechzehn": 16, "Siebzehn": 17,
-    "Achtzehn": 18, "Neunzehn": 19, "Zwanzig": 20,
-}
+#: Dateien, die der Bot zur Laufzeit selbst anlegt. Das README nennt sie,
+#: aber ein frisch eingerichtetes Repo hat sie noch nicht -- und das README
+#: sagt selbst: "state.json im neuen Repo loeschen". Ohne diese Ausnahme
+#: waere der Test bei jedem rot, der die eigene Anleitung befolgt.
+LAUFZEITDATEIEN = {"state.json"}
 
 
-def readme_dateiliste() -> tuple[int, set[str]]:
-    """Die Zahl aus dem Einleitungssatz und die Namen aus dem Block darunter."""
-    text = (Path(__file__).resolve().parent.parent
-            / "README.md").read_text(encoding="utf-8")
-    muster = (r"^(\w+) Dateien, und jede hat genau eine Aufgabe:"
-              r"\s*\n+```\n(.*?)\n```")
-    kopf = re.search(muster, text, re.MULTILINE | re.DOTALL)
+def readme_dateiliste() -> tuple[int, list[str]]:
+    """Die Zahl aus dem Einleitungssatz und die Zeilen des Blocks darunter.
+
+    Als Liste, nicht als Menge: Eine doppelte Zeile im Block soll auffallen,
+    und in einer Menge verschwindet sie.
+    """
+    text = (WURZEL / "README.md").read_text(encoding="utf-8")
+    kopf = re.search(r"(\d+) Dateien, und jede hat genau eine Aufgabe:"
+                     r"\s*\n+```\n(.*?)\n```", text, re.DOTALL)
     assert kopf, "Der Aufbau-Block im README sieht nicht mehr aus wie erwartet"
-    zahl = ZAHLWORT[kopf.group(1)]
-    namen = {zeile.split()[0] for zeile in kopf.group(2).splitlines() if zeile.strip()}
-    return zahl, namen
+    namen = [zeile.split()[0] for zeile in kopf.group(2).splitlines()
+             if zeile.strip()]
+    return int(kopf.group(1)), namen
+
+
+def versionierte_dateien() -> set[str]:
+    """Was git verfolgt -- oder Test ueberspringen, wenn kein git da ist.
+
+    Ohne .git (ZIP-Download, git archive) oder ohne git-Binary gibt es
+    nichts zu vergleichen. Das ist kein Fehler des Projekts, also kein
+    roter Test, sondern ein uebersprungener. In CI ist beides immer da.
+
+    -z und quotePath=false, weil git sonst Pfade mit Leerzeichen am
+    Leerzeichen zerlegt ankommen liesse und Umlaute oktal maskiert
+    ("\\303\\244") -- beides passte nie zur Schreibweise im README.
+    """
+    try:
+        fertig = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "ls-files", "-z"],
+            capture_output=True, text=True, cwd=WURZEL)
+    except FileNotFoundError:
+        pytest.skip("git ist nicht installiert")
+    if fertig.returncode != 0:
+        pytest.skip(f"kein git-Arbeitsbaum: {fertig.stderr.strip()}")
+    return {pfad for pfad in fertig.stdout.split("\0") if pfad}
 
 
 def test_readme_listet_genau_die_versionierten_dateien():
-    """Die README behauptet "Elf Dateien, und jede hat genau eine Aufgabe"
-    und zaehlt sie auf. Das ist -- anders als die SICHERHEITSNETZ-Tabelle
-    daneben -- reine Behauptung: Wer eine Datei anlegt oder loescht, merkt
-    nichts davon.
+    """Die README behauptet "Das Repo besteht aus N Dateien, und jede hat
+    genau eine Aufgabe" und zaehlt sie auf. Das ist -- anders als die
+    SICHERHEITSNETZ-Tabelle daneben -- ohne diesen Test reine Behauptung:
+    Wer eine Datei anlegt oder loescht, merkt nichts davon.
 
-    Die README begruendet die Tabellenpruefung selbst mit "eine Doku wird
-    nicht ausgefuehrt, also wird sie hier ausgefuehrt". Derselbe Satz gilt
-    fuer die Dateiliste, und genau hier wurde er bisher nicht angewandt.
+    Geprueft wird:
+      * jede versionierte Datei steht im Block,
+      * jede Datei im Block ist versioniert -- ausser Laufzeitdateien,
+        die in einem frischen Repo noch fehlen duerfen,
+      * keine Zeile steht doppelt,
+      * die Zahl im Satz entspricht den Zeilen des Blocks.
 
-    Geprueft wird in beide Richtungen plus die Zahl im Satz -- eine
-    Dateiliste, die zwar stimmt, aber mit "Zehn Dateien" eingeleitet
-    wird, ist genauso falsch.
-
-    Mutationstest: eine Zeile aus dem Aufbau-Block des README entfernen
-    -> dieser Test muss rot werden.
+    Mutationstests (je einzeln rot): eine Zeile aus dem Block entfernen,
+    eine Zeile verdoppeln, die Zahl im Satz aendern. Gruen bleiben muss
+    der Test dagegen, wenn state.json nicht versioniert ist.
     """
-    zahl, genannt = readme_dateiliste()
-    fertig = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
-                            cwd=Path(__file__).resolve().parent.parent)
-    assert fertig.returncode == 0, "git ls-files nicht ausfuehrbar"
-    versioniert = {z for z in fertig.stdout.split() if z}
+    zahl, zeilen = readme_dateiliste()
+    genannt = set(zeilen)
+    versioniert = versionierte_dateien()
 
+    assert len(zeilen) == len(genannt), "eine Datei steht doppelt im Block"
     assert versioniert - genannt == set(), "versioniert, aber nicht im README genannt"
-    assert genannt - versioniert == set(), "im README genannt, aber nicht versioniert"
-    assert zahl == len(versioniert), (
-        f"Der Einleitungssatz nennt {zahl}, versioniert sind {len(versioniert)}")
+    assert genannt - versioniert <= LAUFZEITDATEIEN, (
+        "im README genannt, aber nicht versioniert")
+    assert zahl == len(zeilen), (
+        f"Der Einleitungssatz nennt {zahl}, der Block hat {len(zeilen)} Zeilen")
 
 
 def test_readme_nennt_jedes_sicherheitsnetz():
@@ -252,8 +275,7 @@ def test_readme_nennt_jedes_sicherheitsnetz():
     der Tabelle macht diesen Test rot, eine geloeschte oder umbenannte
     Zeile ebenso.
     """
-    readme = (Path(__file__).resolve().parent.parent
-              / "README.md").read_text(encoding="utf-8")
+    readme = (WURZEL / "README.md").read_text(encoding="utf-8")
     # Nur die Tabelle, nicht der uebrige Fliesstext: Zeilen der Form
     # "| Zusicherung | `test_...` |".
     genannt = set(re.findall(r"^\|.*\|\s*`(test_\w+)`\s*\|$",

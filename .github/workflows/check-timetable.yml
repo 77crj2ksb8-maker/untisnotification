@@ -43,9 +43,9 @@ permissions:
   contents: write        # noetig, um state.json zurueckzuschreiben
 
 concurrency:
-  # Diese Gruppe ist das Herz des Dauerbetriebs, siehe Kopfkommentar: Sie
-  # sorgt dafuer, dass immer genau ein Lauf laeuft und genau einer bereit
-  # steht, der nahtlos uebernimmt.
+  # Diese Gruppe ist das Herz des Dauerbetriebs (README.md, "Wie es
+  # laeuft"): Sie sorgt dafuer, dass immer genau ein Lauf laeuft und genau
+  # einer bereit steht, der nahtlos uebernimmt.
   #
   # Testnachricht und selftest bekommen je eine eigene Gruppe -- der Modus
   # steht im Gruppennamen. Sonst muessten sie hinter einem laufenden watch
