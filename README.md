@@ -399,10 +399,10 @@ Bedeutungen von „rot":
   begann. Läge er in derselben Datei, zählte er seine eigenen Läufe als
   Lebenszeichen und meldete „alles in Ordnung", während die Kette längst tot
   ist. Er braucht außerdem `actions: read`, die Kette `contents: write`.
-* Die **Tests** hingen in derselben Datei an der workflow-weiten
+* Stünden die **Tests** in derselben Datei, hingen sie an der workflow-weiten
   `concurrency` der Kette. Schlimmer als die Wartezeit von bis zu 5,5
   Stunden: Ein Push-Lauf in dieser Gruppe ersetzte den wartenden Kettenlauf
-  — jeder Push kostete dann ein ganzes Glied der Laufkette.
+  — jeder Push kostete ein ganzes Glied der Laufkette.
 
 Der Bot selbst ist dagegen **eine** Datei. Auch das ist Absicht: Das Projekt
 ist klein genug, und beim Einspielen über die GitHub-Weboberfläche ist eine

@@ -26,9 +26,11 @@ test_readme_nennt_jedes_sicherheitsnetz haelt sie dort aktuell.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import datetime as dt
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -204,36 +206,57 @@ def readme_dateiliste() -> tuple[int, list[str]]:
 
     Als Liste, nicht als Menge: Eine doppelte Zeile im Block soll auffallen,
     und in einer Menge verschwindet sie.
+
+    Getrennt wird an ZWEI Leerzeichen, nicht an einem: Der Block ist
+    spaltenbuendig gesetzt, zwischen Name und Beschreibung stehen immer
+    mehrere. Ein einzelnes Leerzeichen kann Teil eines Dateinamens sein.
     """
     text = (WURZEL / "README.md").read_text(encoding="utf-8")
     kopf = re.search(r"(\d+) Dateien, und jede hat genau eine Aufgabe:"
                      r"\s*\n+```\n(.*?)\n```", text, re.DOTALL)
     assert kopf, "Der Aufbau-Block im README sieht nicht mehr aus wie erwartet"
-    namen = [zeile.split()[0] for zeile in kopf.group(2).splitlines()
-             if zeile.strip()]
+    namen = [re.split(r"\s{2,}", zeile.strip())[0]
+             for zeile in kopf.group(2).splitlines() if zeile.strip()]
     return int(kopf.group(1)), namen
 
 
+def ohne_git(grund: str) -> None:
+    """Ueberspringen -- ausser in GitHub Actions, dort ist es ein Fehler.
+
+    Lokal ist ein fehlendes git kein Mangel des Projekts (ZIP-Download,
+    git archive, fremder Besitzer des Verzeichnisses). In CI dagegen waere
+    ein Skip ein stillschweigend abgeschalteter Waechter: "469 passed,
+    1 skipped" sieht gruen aus, und der Grund steht wegen addopts = "-q"
+    nicht einmal in der Ausgabe.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail(f"In CI muss git verfuegbar sein: {grund}")
+    pytest.skip(grund)
+
+
 def versionierte_dateien() -> set[str]:
-    """Was git verfolgt -- oder Test ueberspringen, wenn kein git da ist.
+    """Was git verfolgt -- oder ohne_git(), wenn es nichts zu vergleichen gibt.
 
-    Ohne .git (ZIP-Download, git archive) oder ohne git-Binary gibt es
-    nichts zu vergleichen. Das ist kein Fehler des Projekts, also kein
-    roter Test, sondern ein uebersprungener. In CI ist beides immer da.
-
-    -z und quotePath=false, weil git sonst Pfade mit Leerzeichen am
-    Leerzeichen zerlegt ankommen liesse und Umlaute oktal maskiert
-    ("\\303\\244") -- beides passte nie zur Schreibweise im README.
+    -z, weil git sonst Pfade mit Sonderzeichen oktal maskiert ("\\303\\244")
+    und die nie zur Schreibweise im README passen. -z schaltet diese
+    Maskierung ab und trennt mit Nullbytes, sodass auch Leerzeichen im
+    Namen heil bleiben. UTF-8 ausdruecklich, weil text=True sonst die
+    Locale nimmt -- unter Windows oder LC_ALL=C kaeme "übersicht.md" als
+    Zeichensalat an oder gar nicht.
     """
     try:
-        fertig = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "ls-files", "-z"],
-            capture_output=True, text=True, cwd=WURZEL)
+        fertig = subprocess.run(["git", "ls-files", "-z"], capture_output=True,
+                                encoding="utf-8", cwd=WURZEL)
     except FileNotFoundError:
-        pytest.skip("git ist nicht installiert")
+        ohne_git("git ist nicht installiert")
     if fertig.returncode != 0:
-        pytest.skip(f"kein git-Arbeitsbaum: {fertig.stderr.strip()}")
-    return {pfad for pfad in fertig.stdout.split("\0") if pfad}
+        ohne_git(f"git ls-files scheiterte: {fertig.stderr.strip()}")
+    dateien = {pfad for pfad in fertig.stdout.split("\0") if pfad}
+    if not dateien:
+        # Etwa eine ZIP, entpackt unterhalb eines fremden Repos: git findet
+        # einen Arbeitsbaum, aber keine dieser Dateien ist darin versioniert.
+        ohne_git("git verfolgt hier keine einzige Datei")
+    return dateien
 
 
 def test_readme_listet_genau_die_versionierten_dateien():
@@ -257,7 +280,8 @@ def test_readme_listet_genau_die_versionierten_dateien():
     genannt = set(zeilen)
     versioniert = versionierte_dateien()
 
-    assert len(zeilen) == len(genannt), "eine Datei steht doppelt im Block"
+    doppelt = [n for n, k in collections.Counter(zeilen).items() if k > 1]
+    assert doppelt == [], f"doppelt im Block: {doppelt}"
     assert versioniert - genannt == set(), "versioniert, aber nicht im README genannt"
     assert genannt - versioniert <= LAUFZEITDATEIEN, (
         "im README genannt, aber nicht versioniert")

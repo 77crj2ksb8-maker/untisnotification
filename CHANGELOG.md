@@ -2,11 +2,31 @@
 
 Kurzfassung, ein Absatz je Version. **Die ausführliche Fassung steht in den
 Commit-Nachrichten des Original-Repos**
-(<https://github.com/77crj2ksb8-maker/untisnotification/commits/main>) — dort
+(<https://github.com/77crj2ksb8-maker/untisnotification/commits/main/CHANGELOG.md>,
+nur die Versions-Commits, ohne die täglichen Zustands-Commits des Bots) — dort
 auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 *nicht* gemacht wurde. Bewusst die URL und nicht `git log`: Ein Repo, das
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
+
+## 2.8.2 — 2026-09-24
+
+Nachbesserung nach einem zweiten Review, diesmal von 2.8.1.
+
+* **2.8.1 versprach mehr, als es hielt:** Pfade mit Leerzeichen kamen zwar
+  von git heil an, das README wurde aber weiter am ersten Leerzeichen
+  zerlegt — eine solche Datei konnte den Test nie bestehen. Getrennt wird jetzt
+  an zwei Leerzeichen, wie der spaltenbündige Block es vorgibt.
+* **Ein übersprungener Test in CI ist jetzt ein Fehler.** Sonst stünde da
+  „469 passed, 1 skipped" — grün, und der Wächter stillschweigend aus. Lokal
+  wird weiter übersprungen, auch wenn git zwar einen Arbeitsbaum findet, aber
+  keine einzige Datei darin verfolgt.
+* git-Ausgabe ausdrücklich als UTF-8 gelesen statt in der Locale; eine
+  doppelte Zeile im Block wird mit Namen gemeldet.
+* Doku: Zahlen im 2.8.0-Eintrag nochmals berichtigt (Datei und Einträge
+  getrennt), der Link im Kopf zeigt auf die Versions-Commits statt auf eine
+  Liste voller Zustands-Commits, und der 2.7.0-Eintrag sagt richtig, dass die
+  Concurrency-Verdrängung auch den Wachhund träfe.
 
 ## 2.8.1 — 2026-09-24
 
@@ -17,8 +37,8 @@ Korrekturen aus einem Code-Review von 2.8.0.
   einen dauerhaft roten Test, denn das README nennt die Datei weiter. Dateien,
   die der Bot zur Laufzeit selbst anlegt, dürfen jetzt fehlen. Außerdem fällt
   eine doppelte Zeile im Block auf, die Zahl im Einleitungssatz ist eine
-  Ziffer und wird gegen die Zeilen des Blocks geprüft, Dateinamen mit
-  Leerzeichen oder Umlauten werden korrekt gelesen, und ohne git-Arbeitsbaum
+  Ziffer und wird gegen die Zeilen des Blocks geprüft, git liefert Dateinamen
+  mit Leerzeichen oder Umlauten unverstümmelt, und ohne git-Arbeitsbaum
   (etwa nach einem ZIP-Download) wird der Test übersprungen statt rot.
 * **Die Größenangabe im 2.8.0-Eintrag war falsch** — „auf ein Drittel" stimmte
   weder für die Datei noch für die alten Einträge. Korrigiert auf gemessene
@@ -27,7 +47,7 @@ Korrekturen aus einem Code-Review von 2.8.0.
   ersetzt hatte, zeigen jetzt direkt aufs README. Der CHANGELOG-Kopf verweist
   auf die Commit-Historie des Original-Repos statt auf `git log`, die ein über
   „Use this template" angelegtes Repo nicht hat. Der 2.7.0-Eintrag nennt
-  wieder beide Gründe für den getrennten Wachhund.
+  wieder beide Gründe für die getrennten Workflows.
 
 ## 2.8.0 — 2026-09-22
 
@@ -35,9 +55,9 @@ Verdichtungsrunde. Kein Verhalten geändert, keine Datei entfernt — die
 Redundanz saß nicht in der Dateiliste, sondern im Fließtext: 29 % des Repos
 waren Prosa, vieles davon in zweiter und dritter Fassung.
 
-* **Dieser CHANGELOG ist eingedampft:** Die Einträge 2.0 bis 2.7.0 schrumpften
-  von 16.969 auf 6.641 Bytes (39 %), mit dem 2.8.0-Eintrag hatte die Datei
-  8.649 Bytes (51 %). Die
+* **Dieser CHANGELOG ist eingedampft:** Die Datei schrumpfte von 16.969 auf
+  8.649 Bytes (51 %), die Einträge 2.0 bis 2.7.0 allein von 16.879 auf 6.432
+  (38 %). Die
   sieben Versions-Commits tragen zusammen mehr Text als die Langfassung hier;
   gestrichen wurde nur, was dort vollständiger steht. Nicht gelöscht wurde die
   Datei: Wer dem README folgt und über „Use this template" einrichtet, bekommt
@@ -67,11 +87,11 @@ des Repos, und kein Test bewacht diese Datei).
 ## 2.7.0 — 2026-09-21
 
 Vierzehn Dateien wurden elf: `SETUP.md`, `COPYRIGHT` und `.env.example` gingen
-im README auf. Die drei Workflows blieben getrennt, aus zwei verschiedenen
-Gründen: Der Wachhund fragt ab, wann der letzte Lauf *dieses* Workflows begann
-— in derselben Datei zählte er seine eigenen Läufe als Lebenszeichen und
-meldete „alles in Ordnung", während die Kette tot ist. Ein einverleibter
-Test-Lauf dagegen käme in die `concurrency`-Gruppe der Laufkette und
+im README auf. Die drei Workflows blieben getrennt, aus zwei Gründen: Der
+Wachhund fragt ab, wann der letzte Lauf *dieses* Workflows begann — in
+derselben Datei zählte er seine eigenen Läufe als Lebenszeichen und meldete
+„alles in Ordnung", während die Kette tot ist. Und jeder einverleibte Lauf, ob
+Wachhund oder Test, käme in die `concurrency`-Gruppe der Laufkette und
 verdrängte dort den wartenden Nachfolger.
 
 * **Ein gescheitertes `git fetch` blieb folgenlos.** Ohne `set -e` liefe der Job
