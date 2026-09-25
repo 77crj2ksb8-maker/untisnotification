@@ -1,80 +1,12 @@
 {
  "schema": 2,
- "saved_at": "2026-09-24T22:04:40+00:00",
+ "saved_at": "2026-09-25T22:01:16+00:00",
  "window": {
-  "from": "2026-09-25",
-  "to": "2026-10-02"
+  "from": "2026-09-26",
+  "to": "2026-10-03"
  },
  "pending": "",
  "lessons": [
-  {
-   "uid": 808364,
-   "date": "2026-09-25",
-   "start": "07:40",
-   "end": "08:25",
-   "subjects": [
-    "GGK"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "",
-   "lesson_no": 12600
-  },
-  {
-   "uid": 808367,
-   "date": "2026-09-25",
-   "start": "08:30",
-   "end": "09:15",
-   "subjects": [
-    "GGK"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "",
-   "lesson_no": 12600
-  },
-  {
-   "uid": 826837,
-   "date": "2026-09-25",
-   "start": "11:15",
-   "end": "12:00",
-   "subjects": [
-    "VBRW(E)"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "VBRW(E)_3WGI13_1_Da",
-   "lesson_no": 109900
-  },
-  {
-   "uid": 826840,
-   "date": "2026-09-25",
-   "start": "12:05",
-   "end": "12:50",
-   "subjects": [
-    "VBRW(E)"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "VBRW(E)_3WGI13_1_Da",
-   "lesson_no": 109900
-  },
   {
    "uid": 801845,
    "date": "2026-09-28",
