@@ -1,6 +1,6 @@
 {
  "schema": 2,
- "saved_at": "2026-09-28T10:34:10+00:00",
+ "saved_at": "2026-09-28T11:19:10+00:00",
  "window": {
   "from": "2026-09-28",
   "to": "2026-10-05"
@@ -529,10 +529,23 @@
    "rooms": [
     "H1.01"
    ],
-   "status": "regular",
+   "status": "cancelled",
    "note": "",
    "group": "",
    "lesson_no": 12600
+  },
+  {
+   "uid": 869308,
+   "date": "2026-10-02",
+   "start": "07:40",
+   "end": "12:50",
+   "subjects": [],
+   "teachers": [],
+   "rooms": [],
+   "status": "irregular",
+   "note": "Wandertag",
+   "group": "",
+   "lesson_no": 1796
   },
   {
    "uid": 808373,
@@ -546,55 +559,10 @@
    "rooms": [
     "H1.01"
    ],
-   "status": "regular",
+   "status": "cancelled",
    "note": "",
    "group": "",
    "lesson_no": 12600
-  },
-  {
-   "uid": 869208,
-   "date": "2026-10-02",
-   "start": "09:20",
-   "end": "10:05",
-   "subjects": [],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "irregular",
-   "note": "",
-   "group": "",
-   "lesson_no": 34395
-  },
-  {
-   "uid": 869262,
-   "date": "2026-10-02",
-   "start": "10:25",
-   "end": "11:10",
-   "subjects": [],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "irregular",
-   "note": "",
-   "group": "",
-   "lesson_no": 35995
-  },
-  {
-   "uid": 869181,
-   "date": "2026-10-02",
-   "start": "11:15",
-   "end": "12:00",
-   "subjects": [],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "irregular",
-   "note": "",
-   "group": "",
-   "lesson_no": 37795
   },
   {
    "uid": 826855,
@@ -612,21 +580,6 @@
    "note": "",
    "group": "VBRW(E)_3WGI13_1_Da",
    "lesson_no": 109900
-  },
-  {
-   "uid": 869244,
-   "date": "2026-10-02",
-   "start": "12:05",
-   "end": "12:50",
-   "subjects": [],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "irregular",
-   "note": "",
-   "group": "",
-   "lesson_no": 39595
   },
   {
    "uid": 826858,
