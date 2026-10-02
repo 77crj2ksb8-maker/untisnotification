@@ -1,93 +1,12 @@
 {
  "schema": 2,
- "saved_at": "2026-10-01T22:03:14+00:00",
+ "saved_at": "2026-10-02T22:04:33+00:00",
  "window": {
-  "from": "2026-10-02",
-  "to": "2026-10-09"
+  "from": "2026-10-03",
+  "to": "2026-10-10"
  },
  "pending": "",
  "lessons": [
-  {
-   "uid": 808370,
-   "date": "2026-10-02",
-   "start": "07:40",
-   "end": "08:25",
-   "subjects": [
-    "GGK"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "cancelled",
-   "note": "",
-   "group": "",
-   "lesson_no": 12600
-  },
-  {
-   "uid": 869308,
-   "date": "2026-10-02",
-   "start": "07:40",
-   "end": "12:50",
-   "subjects": [],
-   "teachers": [],
-   "rooms": [],
-   "status": "irregular",
-   "note": "Wandertag",
-   "group": "",
-   "lesson_no": 1796
-  },
-  {
-   "uid": 808373,
-   "date": "2026-10-02",
-   "start": "08:30",
-   "end": "09:15",
-   "subjects": [
-    "GGK"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "cancelled",
-   "note": "",
-   "group": "",
-   "lesson_no": 12600
-  },
-  {
-   "uid": 826855,
-   "date": "2026-10-02",
-   "start": "11:15",
-   "end": "12:00",
-   "subjects": [
-    "VBRW(E)"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "cancelled",
-   "note": "",
-   "group": "VBRW(E)_3WGI13_1_Da",
-   "lesson_no": 109900
-  },
-  {
-   "uid": 826858,
-   "date": "2026-10-02",
-   "start": "12:05",
-   "end": "12:50",
-   "subjects": [
-    "VBRW(E)"
-   ],
-   "teachers": [],
-   "rooms": [
-    "H1.01"
-   ],
-   "status": "cancelled",
-   "note": "",
-   "group": "VBRW(E)_3WGI13_1_Da",
-   "lesson_no": 109900
-  },
   {
    "uid": 801857,
    "date": "2026-10-05",
