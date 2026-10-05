@@ -1,6 +1,6 @@
 {
  "schema": 2,
- "saved_at": "2026-10-04T22:22:00+00:00",
+ "saved_at": "2026-10-05T17:24:00+00:00",
  "window": {
   "from": "2026-10-05",
   "to": "2026-10-12"
@@ -161,23 +161,6 @@
    "lesson_no": 108300
   },
   {
-   "uid": 834694,
-   "date": "2026-10-06",
-   "start": "09:20",
-   "end": "10:05",
-   "subjects": [
-    "DV2"
-   ],
-   "teachers": [],
-   "rooms": [
-    "DV2_2.03"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "DV2_3WGI13_1_Wa",
-   "lesson_no": 108400
-  },
-  {
    "uid": 834001,
    "date": "2026-10-06",
    "start": "10:25",
@@ -193,23 +176,6 @@
    "note": "",
    "group": "DV1_3WGI13_1_Ab",
    "lesson_no": 108300
-  },
-  {
-   "uid": 834697,
-   "date": "2026-10-06",
-   "start": "10:25",
-   "end": "11:10",
-   "subjects": [
-    "DV2"
-   ],
-   "teachers": [],
-   "rooms": [
-    "DV2_2.03"
-   ],
-   "status": "regular",
-   "note": "",
-   "group": "DV2_3WGI13_1_Wa",
-   "lesson_no": 108400
   },
   {
    "uid": 826867,
