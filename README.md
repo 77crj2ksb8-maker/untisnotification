@@ -450,9 +450,10 @@ pip install -r requirements.txt
 
 python -m pytest             # keine Netzverbindung nötig
 ruff check .                 # Linter
+pip install actionlint-py && actionlint   # prüft die Workflow-Dateien
 ```
 
-Beides läuft bei jedem Push auch in GitHub Actions
+Alles drei läuft bei jedem Push auch in GitHub Actions
 (`.github/workflows/tests.yml`). Die Einstellungen stehen in
 `pyproject.toml`; dort ist auch begründet, welche Linter-Regeln bewusst
 abgewählt sind und warum.

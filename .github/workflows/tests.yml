@@ -32,5 +32,14 @@ jobs:
       - name: Linter
         run: ruff check .
 
+      # Prueft die Workflow-Dateien selbst: Ausdruecke, Kontexte, Rechte --
+      # und ueber das auf dem Runner vorinstallierte shellcheck jeden
+      # run-Block. Steht nicht in requirements.txt, weil der Bot-Job es nie
+      # braucht.
+      - name: Workflows pruefen
+        run: |
+          pip install actionlint-py==1.7.12.25
+          actionlint
+
       - name: Tests
         run: python -m pytest

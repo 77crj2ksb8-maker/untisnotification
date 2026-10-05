@@ -129,12 +129,18 @@ WURZEL = Path(__file__).resolve().parent.parent
 WORKFLOWS = sorted((WURZEL / ".github" / "workflows").glob("*.yml"))
 
 
-def run_bloecke():
-    """Jeder run-Block aller Workflows, als (Datei, Schrittname, Text)."""
+def workflow(name):
+    """Eine Workflow-Datei als dict."""
     import yaml
 
+    return yaml.safe_load((WURZEL / ".github" / "workflows" / name)
+                          .read_text(encoding="utf-8"))
+
+
+def run_bloecke():
+    """Jeder run-Block aller Workflows, als (Datei, Schrittname, Text)."""
     for datei in WORKFLOWS:
-        beschreibung = yaml.safe_load(datei.read_text(encoding="utf-8"))
+        beschreibung = workflow(datei.name)
         for job in beschreibung.get("jobs", {}).values():
             for schritt in job.get("steps", []):
                 if "run" in schritt:
@@ -287,6 +293,15 @@ def test_readme_listet_genau_die_versionierten_dateien():
         "im README genannt, aber nicht versioniert")
     assert zahl == len(zeilen), (
         f"Der Einleitungssatz nennt {zahl}, der Block hat {len(zeilen)} Zeilen")
+
+
+def test_changelog_beginnt_mit_der_laufenden_version():
+    """VERSION steht im User-Agent jeder Anfrage an WebUntis und Telegram.
+    Ein Eintrag ohne Versionssprung -- oder ein Sprung ohne Eintrag -- faellt
+    sonst niemandem auf."""
+    text = (WURZEL / "CHANGELOG.md").read_text(encoding="utf-8")
+    oberste = re.search(r"^## (\S+)", text, re.MULTILINE).group(1)
+    assert oberste == bot.VERSION
 
 
 def test_readme_nennt_jedes_sicherheitsnetz():
@@ -3353,16 +3368,14 @@ def klassen_session(namen, geholt):
     return Sitzung()
 
 
-def test_by_klasse_findet_die_klasse():
+def test_by_klasse_findet_die_klasse(cfg):
     """Der Rueckfall auf den Klassenplan greift nur, wenn der persoenliche
     Plan gar nicht abrufbar ist -- also genau dann, wenn ohnehin schon
     etwas klemmt. Ungeprueft faellt ein Fehler darin erst in dem Moment
     auf, in dem man ihn am wenigsten gebrauchen kann.
     """
     geholt = []
-    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
-                 untis_server="s", untis_school="k", untis_user="u",
-                 untis_password="p", untis_klasse="3WGI13")
+    cfg = dataclasses.replace(cfg, untis_klasse="3WGI13")
     u = untis_mit(cfg, klassen_session(["1A", "3WGI13", "2B"], geholt))
     spanne = (dt.date(2026, 9, 14), dt.date(2026, 9, 21))
 
@@ -3370,40 +3383,33 @@ def test_by_klasse_findet_die_klasse():
     assert geholt == [("3WGI13", *spanne)]
 
 
-def test_by_klasse_ignoriert_gross_und_kleinschreibung():
+def test_by_klasse_ignoriert_gross_und_kleinschreibung(cfg):
     """WEBUNTIS_KLASSE tippt ein Mensch in ein Secret-Feld ab. "3wgi13"
     darf nicht an der Schreibweise scheitern."""
     geholt = []
-    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
-                 untis_server="s", untis_school="k", untis_user="u",
-                 untis_password="p", untis_klasse="3wgi13")
+    cfg = dataclasses.replace(cfg, untis_klasse="3wgi13")
     u = untis_mit(cfg, klassen_session(["3WGI13"], geholt))
     u._by_klasse(dt.date(2026, 9, 14), dt.date(2026, 9, 21))
     assert [n for n, _s, _e in geholt] == ["3WGI13"]
 
 
-def test_by_klasse_nennt_die_vorhandenen_klassen():
+def test_by_klasse_nennt_die_vorhandenen_klassen(cfg):
     """Ein Tippfehler im Secret ist der wahrscheinlichste Fehler hier.
     "Klasse unbekannt" allein zwingt zum Raten -- die Liste beantwortet
     die Frage sofort."""
-    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
-                 untis_server="s", untis_school="k", untis_user="u",
-                 untis_password="p", untis_klasse="3WGI31")
+    cfg = dataclasses.replace(cfg, untis_klasse="3WGI31")
     u = untis_mit(cfg, klassen_session(["1A", "3WGI13"], []))
     with pytest.raises(bot.UntisError, match="3WGI13"):
         u._by_klasse(dt.date(2026, 9, 14), dt.date(2026, 9, 21))
 
 
-def test_timetable_faellt_auf_den_klassenplan_zurueck():
+def test_timetable_faellt_auf_den_klassenplan_zurueck(cfg):
     """Die Verdrahtung, nicht nur der Baustein: Erst wenn my_timetable
     WIRFT, wird der Klassenplan geholt. Ein LEERER persoenlicher Plan darf
     ihn nicht ausloesen -- sonst verschickte der Bot bei einem stillen
     Ausfall den Plan der ganzen Klasse als Massen-Aenderung."""
     geholt = []
-    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
-                 untis_server="s", untis_school="k", untis_user="u",
-                 untis_password="p", untis_klasse="3WGI13")
-
+    cfg = dataclasses.replace(cfg, untis_klasse="3WGI13")
     u = untis_mit(cfg, klassen_session(["3WGI13"], geholt))
     u._convert = lambda periods, _resolve: [lesson(uid=1)]
     u._resolver = lambda: (lambda _art, _ids: ())
@@ -3411,11 +3417,9 @@ def test_timetable_faellt_auf_den_klassenplan_zurueck():
     assert [n for n, _s, _e in geholt] == ["3WGI13"]
 
 
-def test_timetable_leerer_persoenlicher_plan_holt_nicht_die_klasse():
+def test_timetable_leerer_persoenlicher_plan_holt_nicht_die_klasse(cfg):
     geholt = []
-    cfg = Config(telegram_token="123:ABC", telegram_chats=("42",),
-                 untis_server="s", untis_school="k", untis_user="u",
-                 untis_password="p", untis_klasse="3WGI13")
+    cfg = dataclasses.replace(cfg, untis_klasse="3WGI13")
 
     sitzung = klassen_session(["3WGI13"], geholt)
     sitzung.my_timetable = lambda start, end: []
@@ -3636,6 +3640,24 @@ def test_timetable_alle_wege_kaputt(cfg, monkeypatch):
 #  Einstieg (CLI)
 # ===========================================================================
 
+@pytest.fixture
+def cli(cfg, monkeypatch):
+    """main() ohne .env und mit festem Config.
+
+    Merkt sich unter "nur_telegram", ob der Befehl die WebUntis-Werte
+    erlassen hat -- daran haengt, ob die Stoermeldung auch ohne sie geht.
+    """
+    verlangt = {}
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+
+    def from_env(telegram_only=False):
+        verlangt["nur_telegram"] = telegram_only
+        return cfg
+
+    monkeypatch.setattr(Config, "from_env", staticmethod(from_env))
+    return verlangt
+
+
 def test_main_konfigurationsfehler_gibt_1(monkeypatch, capsys):
     monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
     def kaputt(**_k):
@@ -3646,20 +3668,15 @@ def test_main_konfigurationsfehler_gibt_1(monkeypatch, capsys):
     assert "KONFIGURATIONSFEHLER" in capsys.readouterr().err
 
 
-def test_main_ohne_unterbefehl_ist_check(cfg, monkeypatch, capsys):
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
+def test_main_ohne_unterbefehl_ist_check(cli, monkeypatch, capsys):
     monkeypatch.setattr(bot, "check_once",
                         lambda c, dry_run=False: bot.Result(bot.OK, message="fertig"))
     assert bot.main([]) == 0
     assert "fertig" in capsys.readouterr().out
 
 
-def test_main_check_dry_run(cfg, monkeypatch):
+def test_main_check_dry_run(cli, monkeypatch):
     gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
-
 
     def fake_check(_cfg, dry_run=False):
         gesehen["dry"] = dry_run
@@ -3670,10 +3687,8 @@ def test_main_check_dry_run(cfg, monkeypatch):
     assert gesehen["dry"] is True
 
 
-def test_main_check_ohne_dry_run(cfg, monkeypatch):
+def test_main_check_ohne_dry_run(cli, monkeypatch):
     gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
 
     def fake_check(_cfg, dry_run=False):
         gesehen["dry"] = dry_run
@@ -3684,18 +3699,14 @@ def test_main_check_ohne_dry_run(cfg, monkeypatch):
     assert gesehen["dry"] is False
 
 
-def test_main_fehlgeschlagener_check_gibt_1(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
+def test_main_fehlgeschlagener_check_gibt_1(cli, monkeypatch):
     monkeypatch.setattr(bot, "check_once",
                         lambda c, dry_run=False: bot.Result(bot.FAILED, message="weg"))
     assert bot.main(["check"]) == 1
 
 
-def test_main_watch_reicht_parameter_durch(cfg, monkeypatch):
+def test_main_watch_reicht_parameter_durch(cli, monkeypatch):
     gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "watch",
                         lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
                                                           night=n) or 0)
@@ -3704,10 +3715,8 @@ def test_main_watch_reicht_parameter_durch(cfg, monkeypatch):
     assert gesehen == {"minutes": 12, "interval": 60, "night": 900}
 
 
-def test_main_watch_standardwerte(cfg, monkeypatch):
+def test_main_watch_standardwerte(cli, monkeypatch):
     gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "watch",
                         lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
                                                           night=n) or 0)
@@ -3717,16 +3726,12 @@ def test_main_watch_standardwerte(cfg, monkeypatch):
     assert gesehen == {"minutes": 330, "interval": 300, "night": None}
 
 
-def test_main_selftest(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
+def test_main_selftest(cli, monkeypatch):
     monkeypatch.setattr(bot, "selftest", lambda c: 0)
     assert bot.main(["selftest"]) == 0
 
 
-def test_main_show(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
+def test_main_show(cli, monkeypatch):
     monkeypatch.setattr(bot, "show", lambda c, d: 0 if d == 3 else 1)
     assert bot.main(["show", "--days", "3"]) == 0
 
@@ -4067,10 +4072,8 @@ def test_config_verlangt_webuntis_sonst_weiterhin(env):
         Config.from_env()
 
 
-def test_main_alert(cfg, monkeypatch):
+def test_main_alert(cli, monkeypatch):
     gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "alert",
                         lambda c, text, quelle: gesehen.update(text=text,
                                                                quelle=quelle) or 0)
@@ -4078,35 +4081,21 @@ def test_main_alert(cfg, monkeypatch):
     assert gesehen == {"text": "Lauf fehlgeschlagen", "quelle": "Lauf 7"}
 
 
-def test_main_alert_fordert_nur_telegram_an(cfg, monkeypatch):
+def test_main_alert_fordert_nur_telegram_an(cli, monkeypatch):
     """Der Unterbefehl muss VOR dem Lesen der Konfiguration feststehen."""
-    gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env",
-                        staticmethod(lambda telegram_only=False:
-                                     gesehen.setdefault("nur_telegram",
-                                                        telegram_only) or cfg))
     monkeypatch.setattr(bot, "alert", lambda *_a, **_k: 0)
     bot.main(["alert", "kaputt"])
-    assert gesehen["nur_telegram"] is True
+    assert cli["nur_telegram"] is True
 
 
-def test_main_check_fordert_alles_an(cfg, monkeypatch):
-    gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env",
-                        staticmethod(lambda telegram_only=False:
-                                     gesehen.setdefault("nur_telegram",
-                                                        telegram_only) or cfg))
+def test_main_check_fordert_alles_an(cli, monkeypatch):
     monkeypatch.setattr(bot, "check_once",
                         lambda _c, dry_run=False: bot.Result(bot.OK))
     bot.main(["check"])
-    assert gesehen["nur_telegram"] is False
+    assert cli["nur_telegram"] is False
 
 
-def test_main_testmessage(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
+def test_main_testmessage(cli, monkeypatch):
     monkeypatch.setattr(bot, "testmessage", lambda c: 0)
     assert bot.main(["testmessage"]) == 0
 
@@ -4261,11 +4250,7 @@ def test_ist_kettenlauf(lauf, erwartet):
 def test_run_name_passt_zur_erkennung_im_wachhund():
     """Der Lauftitel entsteht im Workflow, erkannt wird er in bot.py.
     Aendert jemand eine Seite, saehe der Wachhund keine Ueberwachung mehr."""
-    import yaml
-
-    workflow = yaml.safe_load((WURZEL / ".github" / "workflows"
-                               / bot.KETTEN_WORKFLOW).read_text(encoding="utf-8"))
-    vorlage = workflow["run-name"]
+    vorlage = workflow(bot.KETTEN_WORKFLOW)["run-name"]
     ausdruck = re.search(r"\$\{\{.*?\}\}", vorlage).group(0)
     assert vorlage.replace(ausdruck, "watch").endswith(bot.KETTEN_TITEL)
     assert not vorlage.replace(ausdruck, "testmessage").endswith(bot.KETTEN_TITEL)
@@ -4481,27 +4466,18 @@ def test_main_nachfolger_ohne_github_zugang(monkeypatch):
     assert bot.main(["nachfolger", "--seit", "0"]) == 1
 
 
-def test_main_wachhund_braucht_nur_telegram(cfg, monkeypatch):
-    gesehen = {}
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setattr(Config, "from_env",
-                        staticmethod(lambda telegram_only=False:
-                                     gesehen.setdefault("nur_telegram",
-                                                        telegram_only) or cfg))
+def test_main_wachhund_braucht_nur_telegram(cli, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
     monkeypatch.setattr(bot, "wachhund", lambda c, z, q: 0)
     assert bot.main(["wachhund"]) == 0
-    assert gesehen["nur_telegram"] is True
+    assert cli["nur_telegram"] is True
 
 
 def ketten_schritte():
-    import yaml
-
-    workflow = yaml.safe_load((WURZEL / ".github" / "workflows"
-                               / bot.KETTEN_WORKFLOW).read_text(encoding="utf-8"))
-    (job,) = workflow["jobs"].values()
-    return workflow, {s.get("name"): (i, s) for i, s in enumerate(job["steps"])}
+    kette = workflow(bot.KETTEN_WORKFLOW)
+    (job,) = kette["jobs"].values()
+    return kette, {s.get("name"): (i, s) for i, s in enumerate(job["steps"])}
 
 
 def test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung():
@@ -4513,7 +4489,7 @@ def test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung():
     Mutationstest: im Workflow "success() &&" durch "always() &&" ersetzen
     -> dieser Test muss rot werden.
     """
-    workflow, schritte = ketten_schritte()
+    kette, schritte = ketten_schritte()
     i_ueberwachen, ueberwachen = schritte["Ueberwachen"]
     i_nachfolger, nachfolger = schritte["Nachfolger anmelden"]
     i_stoerung, _ = schritte["Stoerung melden"]
@@ -4525,16 +4501,13 @@ def test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung():
     assert "bot.py nachfolger" in nachfolger["run"]
     assert "UNTISBOT_START" in ueberwachen["run"]
     assert i_ueberwachen < i_nachfolger < i_stoerung
-    assert workflow["permissions"]["actions"] == "write"
+    assert kette["permissions"]["actions"] == "write"
 
 
 def test_wachhund_workflow_darf_neu_anwerfen():
-    import yaml
-
-    workflow = yaml.safe_load((WURZEL / ".github" / "workflows"
-                               / "watchdog.yml").read_text(encoding="utf-8"))
-    assert workflow["permissions"]["actions"] == "write"
-    (job,) = workflow["jobs"].values()
+    wachhund = workflow("watchdog.yml")
+    assert wachhund["permissions"]["actions"] == "write"
+    (job,) = wachhund["jobs"].values()
     assert any("bot.py wachhund" in s.get("run", "") for s in job["steps"])
 
 

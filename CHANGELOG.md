@@ -9,6 +9,20 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
+## 2.9.1 — 2026-10-05
+
+**Aufgeräumt, ohne den Hauptpfad zu ändern.** `webuntis` ist auf `<0.2`
+begrenzt, weil jeder Kettenlauf frisch installiert und eine neue
+Schnittstelle sonst ungeprüft in den Betrieb käme; `ruff` ist auf 0.16
+festgelegt, damit CI nicht ohne Codeänderung rot wird. CI prüft die
+Workflow-Dateien jetzt zusätzlich mit actionlint, samt shellcheck für jeden
+`run`-Block — die Fehlerklasse aus 2.3.0 fängt damit ein eigenes Werkzeug,
+nicht nur `bash -n`. Die Wachhund-Meldungen setzen den Gedankenstrich wie alle
+anderen Telegram-Texte. Im Code: Importe oben statt verstreut, `main()` lädt
+die Konfiguration an einer Stelle; in den Tests ersetzen eine `cli`-Fixture,
+ein Workflow-Lader und die `cfg`-Fixture kopierte Stubs und Configs. Ein
+neuer Test hält `VERSION` und den obersten CHANGELOG-Eintrag gleich.
+
 ## 2.9.0 — 2026-10-05
 
 **Die Laufkette trägt sich selbst.** Am 05.10. löste GitHubs Zeitplaner während

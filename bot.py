@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import html
 import json
 import logging
@@ -46,6 +47,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -59,7 +61,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.9.0"
+VERSION = "2.9.1"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -202,8 +204,6 @@ def now_local(tz_name: str) -> dt.datetime:
 def zone_of(tz_name: str) -> dt.tzinfo | None:
     """Die Zeitzone -- oder None, wenn sie nicht nutzbar ist."""
     try:
-        from zoneinfo import ZoneInfo
-
         return ZoneInfo(tz_name)
     except Exception as exc:
         log.warning("Zeitzone %s nicht nutzbar (%s) -- nutze Systemzeit", tz_name, exc)
@@ -417,6 +417,9 @@ class Untis:
     # -- Lebenszyklus ------------------------------------------------------
 
     def __enter__(self) -> Untis:
+        # Bewusst erst hier: alert, wachhund und nachfolger brauchen kein
+        # WebUntis. Laege der Import oben, haengte die Stoermeldung an einer
+        # Bibliothek, die sie gar nicht benutzt.
         import webuntis
 
         self._session = webuntis.Session(
@@ -1674,8 +1677,6 @@ def confirm_or_hold(pending: str, mark: str) -> tuple[bool, str, int]:
 
 def fingerprint(lessons: Sequence[Lesson]) -> str:
     """Kurzer, stabiler Fingerabdruck einer Stundenliste."""
-    import hashlib
-
     material = "|".join(sorted(f"{lesson.key}#{lesson.status}#{lesson.rooms}"
                                for lesson in lessons))
     return hashlib.sha256(material.encode()).hexdigest()[:16]
@@ -2147,7 +2148,7 @@ def wachhund_befund(laeufe: Sequence[dict], jetzt: dt.datetime,
     if aktiv:
         lauf = aktiv[0]
         return Befund("ruhig", False, f"Lauf {lauf.get('run_number')} ist "
-                                      f"{lauf.get('status')} -- die Kette lebt.")
+                                      f"{lauf.get('status')} — die Kette lebt.")
 
     beendet = [lauf for lauf in laeufe
                if ist_kettenlauf(lauf) and lauf.get("updated_at")]
@@ -2161,7 +2162,7 @@ def wachhund_befund(laeufe: Sequence[dict], jetzt: dt.datetime,
 
     if seit < WACHHUND_KULANZ:
         return Befund("ruhig", False, f"Lauf {nummer} endete vor {seit} Minuten "
-                                      "-- die nächste Runde sieht erneut nach.")
+                                      "— die nächste Runde sieht erneut nach.")
 
     if letzter.get("conclusion") in FEHLSCHLAEGE:
         if seit < WACHHUND_FEHLERPAUSE:
@@ -2175,7 +2176,7 @@ def wachhund_befund(laeufe: Sequence[dict], jetzt: dt.datetime,
     uhr = (f"{ende.astimezone(zone):%H:%M} Uhr" if zone
            else f"{ende:%H:%M} UTC")
     return Befund("neustart", True,
-                  f"Die Laufkette stand seit {uhr} still -- {seit} Minuten "
+                  f"Die Laufkette stand seit {uhr} still — {seit} Minuten "
                   "ohne Überwachung.")
 
 
@@ -2231,7 +2232,7 @@ def wachhund(cfg: Config, zugang: GitHubZugang, quelle: str = "") -> int:
         # Nach einem Fehlschlag meldet sich der neue Lauf selbst, falls er
         # wieder scheitert. Eine zweite Meldung dazu waere nur Laerm.
         return 0
-    return alert(cfg, f"{befund.lage} Der Wachhund hat sie neu angeworfen -- "
+    return alert(cfg, f"{befund.lage} Der Wachhund hat sie neu angeworfen — "
                       "du musst nichts tun.", quelle)
 
 
@@ -2801,20 +2802,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     command = args.command or "check"
 
-    if command == "nachfolger":
-        # Braucht weder Telegram noch WebUntis -- also auch nicht deren
-        # Pflichtwerte. Fehlte einer, risse sonst ausgerechnet die Kette ab.
-        try:
-            zugang = GitHubZugang.from_env()
-        except ConfigError as exc:
-            print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
-            return 1
-        return nachfolger(zugang, args.seit, time.time())
-
+    # Jeder Befehl verlangt nur, was er braucht. nachfolger braucht weder
+    # Telegram noch WebUntis -- fehlte deren Pflichtwert, risse sonst
+    # ausgerechnet die Kette ab. alert und wachhund brauchen kein WebUntis
+    # -- sonst schwiege die Stoermeldung genau dann, wenn sie noetig ist.
     try:
-        # Die Stoermeldung soll auch dann noch rausgehen, wenn die
-        # WebUntis-Zugangsdaten fehlen -- sonst schwiege ausgerechnet der
-        # Wachhund, dessen einzige Aufgabe das Melden ist.
+        zugang = (GitHubZugang.from_env()
+                  if command in ("nachfolger", "wachhund") else None)
+        if command == "nachfolger":
+            return nachfolger(zugang, args.seit, time.time())
         cfg = Config.from_env(telegram_only=command in ("alert", "wachhund"))
     except ConfigError as exc:
         print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
@@ -2823,11 +2819,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "alert":
         return alert(cfg, args.text, args.quelle)
     if command == "wachhund":
-        try:
-            zugang = GitHubZugang.from_env()
-        except ConfigError as exc:
-            print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
-            return 1
         return wachhund(cfg, zugang, args.quelle)
     if command == "selftest":
         return selftest(cfg)
