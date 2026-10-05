@@ -22,6 +22,8 @@ Aufrufe:
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py alert "..."        Stoermeldung senden
+    python bot.py nachfolger --seit  naechsten Lauf anmelden (nur Actions)
+    python bot.py wachhund           Kette pruefen, notfalls anwerfen (Actions)
     python bot.py show               Stundenplan anzeigen (Diagnose)
 """
 
@@ -57,7 +59,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -94,7 +96,8 @@ class Config:
     def from_env(telegram_only: bool = False) -> Config:
         """Liest die Konfiguration aus Umgebungsvariablen.
 
-        Die einzige Stelle im Programm, die os.environ anfasst.
+        Fuer Telegram und WebUntis die einzige Stelle, die os.environ
+        anfasst. Die GitHub-Zugangsdaten liest GitHubZugang.from_env.
 
         Mit telegram_only werden die WebUntis-Werte nicht verlangt: Eine
         Stoermeldung braucht nur den Telegram-Kanal. Ohne diese Ausnahme
@@ -192,13 +195,19 @@ def now_local(tz_name: str) -> dt.datetime:
     Der GitHub-Runner laeuft in UTC. Ohne Umrechnung waere "heute"/"morgen"
     in den Nachrichten zeitweise um einen Tag daneben.
     """
+    zone = zone_of(tz_name)
+    return dt.datetime.now(zone) if zone else dt.datetime.now()
+
+
+def zone_of(tz_name: str) -> dt.tzinfo | None:
+    """Die Zeitzone -- oder None, wenn sie nicht nutzbar ist."""
     try:
         from zoneinfo import ZoneInfo
 
-        return dt.datetime.now(ZoneInfo(tz_name))
+        return ZoneInfo(tz_name)
     except Exception as exc:
         log.warning("Zeitzone %s nicht nutzbar (%s) -- nutze Systemzeit", tz_name, exc)
-        return dt.datetime.now()
+        return None
 
 
 # ===========================================================================
@@ -1917,6 +1926,316 @@ def _commit_state(path: Path) -> bool:
 
 
 # ===========================================================================
+#  Laufkette  -- nur auf GitHub relevant
+# ===========================================================================
+#
+# Zwei Bausteine halten die Kette am Leben, beide ueber die GitHub-API:
+#
+#   nachfolger  Jeder erfolgreiche Lauf meldet am Ende seinen Nachfolger an.
+#               Bis 2.8 hing die Kette allein am Zeitplaner -- und der loeste
+#               am 05.10. waehrend der gesamten Laufzeit von Lauf 96 kein
+#               einziges Mal aus. Ohne wartenden Nachfolger riss sie ab.
+#   wachhund    Sieht von aussen nach, ob gerade ein Lauf laeuft oder wartet,
+#               und wirft die Kette bei Stillstand selbst wieder an.
+#
+# Der Zeitplaner bleibt die dritte Ebene: Er startet die Kette in einem
+# frischen Repo und faengt auf, was beide Bausteine verfehlen.
+
+#: Workflow-Datei der Laufkette. Ein Test haelt den Namen ehrlich.
+KETTEN_WORKFLOW = "check-timetable.yml"
+
+#: Laufzeit eines angemeldeten Laufs -- dieselbe wie der Workflow-Standard.
+KETTEN_MINUTEN = 330
+
+#: Endung des Lauftitels einer Ueberwachung, gesetzt ueber run-name in
+#: check-timetable.yml. Testnachricht und selftest enden anders.
+KETTEN_TITEL = "· watch"
+
+#: Ein Lauf, der kuerzer war, meldet keinen Nachfolger an. Sturmschutz:
+#: Endete ein Lauf aus irgendeinem Grund sofort mit Erfolg, meldete er
+#: einen Nachfolger an, der ebenso sofort endete und den naechsten anmeldete
+#: -- eine Schleife im Minutentakt, jede Runde eine WebUntis-Anmeldung.
+#: watch() endet mit 0 heute nur nach Ablauf seiner Laufzeit; diese Grenze
+#: haelt auch dann, wenn sich das je aendert. Ein normaler Lauf dauert
+#: fuenf bis fuenfeinhalb Stunden.
+NACHFOLGER_MINDESTLAUFZEIT = 20 * 60          # Sekunden
+
+#: So lange wartet der Wachhund nach einem gescheiterten Lauf mit dem
+#: Neustart. Die Stoermeldung zu diesem Lauf ist dann schon raus; bei einem
+#: Dauerfehler (Passwort geaendert) braechte jeder sofortige Neustart nur
+#: die naechste Meldung -- alle halbe Stunde, die ganze Nacht.
+WACHHUND_FEHLERPAUSE = 120                    # Minuten
+
+#: Ein gerade beendeter Lauf gilt noch kurz als lebendig. Sein angemeldeter
+#: Nachfolger taucht in der API womoeglich erst einen Moment spaeter auf --
+#: ohne diese Spanne wuerfe der Wachhund genau dann eine zweite Kette an.
+WACHHUND_KULANZ = 10                          # Minuten
+
+#: Diese Abschluesse heissen: Der Lauf ist gescheitert, die Stoermeldung
+#: ist raus. "cancelled" gehoert nicht dazu -- so enden auch die wartenden
+#: Laeufe, die ein neuerer ersetzt hat.
+FEHLSCHLAEGE = {"failure", "timed_out", "startup_failure"}
+
+
+class GitHubError(RuntimeError):
+    """Die GitHub-API hat die Anfrage nicht angenommen."""
+
+
+@dataclass(frozen=True)
+class GitHubZugang:
+    """Was die GitHub-API braucht. In Actions setzt der Workflow alles."""
+
+    token: str
+    repo: str                                 # "besitzer/name"
+    api: str = "https://api.github.com"
+
+    @staticmethod
+    def from_env() -> GitHubZugang:
+        token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+        repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip()
+        if not token or not repo:
+            raise ConfigError(
+                "GITHUB_TOKEN oder GITHUB_REPOSITORY fehlt.\n"
+                "  In GitHub Actions setzt der Workflow beides selbst;"
+                " lokal braucht es diesen Befehl nicht."
+            )
+        api = os.environ.get("GITHUB_API_URL") or "https://api.github.com"
+        return GitHubZugang(token, repo, api.rstrip("/"))
+
+
+def github_call(zugang: GitHubZugang, method: str, pfad: str = "",
+                payload: dict | None = None,
+                params: dict | None = None) -> Any:
+    """Ein Aufruf gegen repos/<repo>/<pfad>. Antwort als JSON, oder None."""
+    url = f"{zugang.api}/repos/{zugang.repo}" + (f"/{pfad}" if pfad else "")
+    ziel = f"{method} {pfad or zugang.repo}"
+    try:
+        response = requests.request(
+            method, url, json=payload, params=params, timeout=TIMEOUT,
+            headers={"Authorization": f"Bearer {zugang.token}",
+                     "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28"})
+    except requests.RequestException as exc:
+        # Der Token steht im Header, nicht in der URL -- trotzdem scrub():
+        # Was in eine Stoermeldung wandern kann, wird nie ungefiltert gebaut.
+        raise GitHubError(f"Netzwerkfehler bei {ziel}: "
+                          f"{scrub(str(exc), zugang.token)}") from None
+
+    if response.status_code >= 400:
+        try:
+            grund = response.json().get("message", "")
+        except (ValueError, AttributeError):
+            grund = response.text[:200]
+        raise GitHubError(f"{ziel} -> HTTP {response.status_code}: "
+                          f"{scrub(str(grund), zugang.token)}")
+    if response.status_code == 204 or not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        raise GitHubError(f"{ziel}: unlesbare Antwort "
+                          f"(HTTP {response.status_code})") from None
+
+
+def kette_anmelden(zugang: GitHubZugang) -> str:
+    """Meldet einen Ueberwachungslauf an (workflow_dispatch). Gibt den Zweig.
+
+    Immer auf dem Standard-Zweig, nicht auf dem des eigenen Laufs: Ein von
+    Hand auf einem anderen Zweig gestarteter Lauf soll an die echte Kette
+    uebergeben, statt eine zweite zu begruenden. Beide teilten sich sonst
+    die concurrency-Gruppe und verdraengten einander im Wechsel.
+
+    Kein Doppelstart: Laeuft schon ein Lauf, reiht sich der angemeldete in
+    der concurrency-Gruppe als wartender ein -- es bleibt bei einem
+    laufenden und hoechstens einem wartenden.
+    """
+    # Jede unerwartete Antwort muss als GitHubError enden: Nur den faengt
+    # der Wachhund ab, und nur dann schickt er die Anleitung zum Handstart.
+    # Ein KeyError liesse ihn stumm abstuerzen -- genau dann, wenn die
+    # Kette steht und nichts sie wieder anwirft.
+    repo = github_call(zugang, "GET")
+    zweig = repo.get("default_branch") if isinstance(repo, dict) else None
+    if not zweig:
+        raise GitHubError("Standard-Zweig des Repos nicht ermittelbar")
+    github_call(zugang, "POST", f"actions/workflows/{KETTEN_WORKFLOW}/dispatches",
+                {"ref": zweig,
+                 # workflow_dispatch nimmt fuer Eingaben nur Zeichenketten.
+                 "inputs": {"modus": "watch", "minuten": str(KETTEN_MINUTEN)}})
+    return zweig
+
+
+def nachfolger_faellig(seit: float, jetzt: float) -> bool:
+    """Darf ein Lauf, der zur Unix-Zeit seit begann, jetzt nachmelden?"""
+    return jetzt - seit >= NACHFOLGER_MINDESTLAUFZEIT
+
+
+def nachfolger(zugang: GitHubZugang, seit: float, jetzt: float) -> int:
+    """Letzter Schritt eines erfolgreichen Ueberwachungslaufs."""
+    minuten = int((jetzt - seit) // 60)
+    if not nachfolger_faellig(seit, jetzt):
+        print(f"Lauf lief nur {minuten} min -- kein Nachfolger (Sturmschutz). "
+              "Die Kette tragen jetzt Zeitplaner und Wachhund.")
+        return 0
+    try:
+        zweig = kette_anmelden(zugang)
+    except GitHubError as exc:
+        print(f"FEHLER: Nachfolger nicht angemeldet: {exc}", file=sys.stderr)
+        return 1
+    print(f"Nachfolger auf {zweig} angemeldet, nach {minuten} Minuten Laufzeit.")
+    return 0
+
+
+@dataclass(frozen=True)
+class Befund:
+    """Was der Wachhund sieht, und was er daraufhin tut."""
+
+    aktion: str        # "ruhig" | "warten" | "neustart"
+    melden: bool       # nach gelungenem Neustart per Telegram berichten
+    lage: str
+
+
+def ist_kettenlauf(lauf: dict) -> bool:
+    """Eine Ueberwachung, keine Testnachricht und kein selftest?
+
+    Laeufe vor 2.9.0 tragen den Modus noch nicht im Titel. Geplant hiess
+    dort immer Ueberwachung. Von Hand gestartet konnte beides sein -- etwa
+    der Neustart am 05.10. Den erkennt man an der Dauer: Eine Testnachricht
+    laeuft eine Minute, eine Ueberwachung Stunden. Ohne diese Regel naehme
+    der Wachhund beim ersten Abriss nach dem Umstieg den letzten GEPLANTEN
+    Lauf als Ende der Kette und nennte eine Uhrzeit, die Stunden daneben
+    liegt.
+    """
+    titel = lauf.get("display_title") or ""
+    if titel.endswith(KETTEN_TITEL):
+        return True
+    if "·" in titel:
+        return False                      # neuer Titel, anderer Modus
+    if lauf.get("event") == "schedule":
+        return True
+    try:
+        dauer = (_zeitpunkt(lauf["updated_at"])
+                 - _zeitpunkt(lauf["run_started_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return False
+    return dauer >= NACHFOLGER_MINDESTLAUFZEIT
+
+
+def _zeitpunkt(text: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def wachhund_befund(laeufe: Sequence[dict], jetzt: dt.datetime,
+                    zone: dt.tzinfo | None = None) -> Befund:
+    """Lebt die Laufkette? Rein -- die Lauf-Historie kommt von aussen.
+
+    Lebendig heisst: Ein Lauf laeuft oder wartet. Bis 2.8 fragte der
+    Wachhund stattdessen, wann der letzte GEPLANTE Lauf BEGANN. Beides war
+    falsch. Gemessen ab dem Ausloesen statt ab dem Ende: Lauf 96 wurde um
+    09:20 UTC ausgeloest und lief bis 15:38; die Meldung sprach von 482
+    Minuten ohne Lauf, als die Kette seit gut anderthalb Stunden stand.
+    Und nur geplante Laeufe: Seit sich die Kette selbst fortsetzt, sind die
+    meisten Laeufe angemeldet statt geplant -- die alte Frage gaebe bei
+    jeder Zeitplaner-Duerre Fehlalarm, waehrend die Kette lebt.
+
+    Fuer "laeuft gerade" zaehlt jeder Lauf, auch eine Testnachricht -- die
+    verdeckt einen Stillstand aber nur die eine Minute, die sie laeuft.
+    Fuer "wann endete die Kette" zaehlen nur Ueberwachungen: Eine
+    Testnachricht, die eben endete, ist kein Lebenszeichen. Das war der
+    Fehler, den 2.7.0 behob, und er darf nicht wiederkommen.
+    """
+    aktiv = [lauf for lauf in laeufe if lauf.get("status") != "completed"]
+    if aktiv:
+        lauf = aktiv[0]
+        return Befund("ruhig", False, f"Lauf {lauf.get('run_number')} ist "
+                                      f"{lauf.get('status')} -- die Kette lebt.")
+
+    beendet = [lauf for lauf in laeufe
+               if ist_kettenlauf(lauf) and lauf.get("updated_at")]
+    if not beendet:
+        return Befund("neustart", False, "Es gibt noch keinen Überwachungslauf.")
+
+    letzter = max(beendet, key=lambda lauf: _zeitpunkt(lauf["updated_at"]))
+    ende = _zeitpunkt(letzter["updated_at"])
+    seit = int((jetzt - ende).total_seconds() // 60)
+    nummer = letzter.get("run_number")
+
+    if seit < WACHHUND_KULANZ:
+        return Befund("ruhig", False, f"Lauf {nummer} endete vor {seit} Minuten "
+                                      "-- die nächste Runde sieht erneut nach.")
+
+    if letzter.get("conclusion") in FEHLSCHLAEGE:
+        if seit < WACHHUND_FEHLERPAUSE:
+            return Befund("warten", False,
+                          f"Lauf {nummer} scheiterte vor {seit} Minuten; die "
+                          "Störmeldung dazu ist raus. Neuer Versuch frühestens "
+                          f"{WACHHUND_FEHLERPAUSE} Minuten nach dem Fehlschlag.")
+        return Befund("neustart", False,
+                      f"Lauf {nummer} scheiterte vor {seit} Minuten.")
+
+    uhr = (f"{ende.astimezone(zone):%H:%M} Uhr" if zone
+           else f"{ende:%H:%M} UTC")
+    return Befund("neustart", True,
+                  f"Die Laufkette stand seit {uhr} still -- {seit} Minuten "
+                  "ohne Überwachung.")
+
+
+def wachhund(cfg: Config, zugang: GitHubZugang, quelle: str = "") -> int:
+    """Nachsehen, ob die Laufkette lebt -- und sie notfalls anwerfen."""
+    try:
+        antwort = github_call(zugang, "GET",
+                              f"actions/workflows/{KETTEN_WORKFLOW}/runs",
+                              params={"per_page": 100})
+    except GitHubError as exc:
+        # Ohne Historie keine Aussage. Rot im Actions-Tab, aber keine
+        # Telegram-Meldung: Eine gestoerte GitHub-API ist meist nach Minuten
+        # wieder da, und die naechste Wachhund-Runde fragt neu.
+        print(f"FEHLER: Lauf-Historie nicht lesbar: {exc}", file=sys.stderr)
+        return 1
+
+    laeufe = antwort.get("workflow_runs") if isinstance(antwort, dict) else None
+    befund = wachhund_befund(laeufe or [],
+                             dt.datetime.now(dt.UTC),
+                             zone_of(cfg.timezone))
+    print(befund.lage)
+    if befund.aktion != "neustart":
+        return 0
+
+    # Wer den Bot anhalten will, deaktiviert den Workflow. Ohne diese
+    # Pruefung versuchte der Wachhund dann jede Runde einen Neustart,
+    # scheiterte daran und schlueg Alarm -- die ganze Nacht.
+    try:
+        zustand = github_call(zugang, "GET",
+                              f"actions/workflows/{KETTEN_WORKFLOW}").get("state")
+    except (GitHubError, AttributeError):
+        zustand = None                    # unklar: lieber den Neustart versuchen
+    if zustand not in (None, "active"):
+        print(f"Workflow ist {zustand} -- kein Neustart.")
+        if zustand == "disabled_manually":
+            return 0                      # bewusst angehalten
+        return alert(cfg, f"{befund.lage} GitHub hat den Workflow abgeschaltet "
+                          f"({zustand}). Wieder einschalten: Actions → "
+                          "„Stundenplan pruefen\" → Enable workflow.", quelle)
+
+    try:
+        kette_anmelden(zugang)
+    except GitHubError as exc:
+        print(f"FEHLER: Neustart gescheitert: {exc}", file=sys.stderr)
+        alert(cfg, f"{befund.lage} Der automatische Neustart ist gescheitert "
+                   f"({exc}).\n\nWieder anwerfen: Actions → „Stundenplan "
+                   "pruefen\" → Run workflow, modus auf watch lassen und "
+                   "minuten nicht anfassen.", quelle)
+        return 1
+
+    print("Kette neu angeworfen.")
+    if not befund.melden:
+        # Nach einem Fehlschlag meldet sich der neue Lauf selbst, falls er
+        # wieder scheitert. Eine zweite Meldung dazu waere nur Laerm.
+        return 0
+    return alert(cfg, f"{befund.lage} Der Wachhund hat sie neu angeworfen -- "
+                      "du musst nichts tun.", quelle)
+
+
+# ===========================================================================
 #  Ablauf
 # ===========================================================================
 
@@ -2460,6 +2779,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_show = sub.add_parser("show", help="Stundenplan anzeigen")
     p_show.add_argument("--days", type=int, default=None)
 
+    # Die beiden Kettenbefehle laufen nur in GitHub Actions, wo der
+    # Workflow GITHUB_TOKEN und GITHUB_REPOSITORY mitgibt.
+    p_nach = sub.add_parser("nachfolger",
+                            help="naechsten Ueberwachungslauf anmelden")
+    p_nach.add_argument("--seit", type=float, required=True,
+                        help="Startzeit dieses Laufs als Unix-Zeit")
+
+    p_wach = sub.add_parser("wachhund",
+                            help="pruefen, ob die Laufkette lebt; notfalls anwerfen")
+    p_wach.add_argument("--quelle", default="",
+                        help="Woher die Meldung kommt, etwa der Link zum Lauf")
+
     args = parser.parse_args(argv)
 
     # Erst die .env einlesen, dann das Log-Niveau bestimmen -- sonst wirkt
@@ -2470,17 +2801,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     command = args.command or "check"
 
+    if command == "nachfolger":
+        # Braucht weder Telegram noch WebUntis -- also auch nicht deren
+        # Pflichtwerte. Fehlte einer, risse sonst ausgerechnet die Kette ab.
+        try:
+            zugang = GitHubZugang.from_env()
+        except ConfigError as exc:
+            print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
+            return 1
+        return nachfolger(zugang, args.seit, time.time())
+
     try:
         # Die Stoermeldung soll auch dann noch rausgehen, wenn die
         # WebUntis-Zugangsdaten fehlen -- sonst schwiege ausgerechnet der
         # Wachhund, dessen einzige Aufgabe das Melden ist.
-        cfg = Config.from_env(telegram_only=(command == "alert"))
+        cfg = Config.from_env(telegram_only=command in ("alert", "wachhund"))
     except ConfigError as exc:
         print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
         return 1
 
     if command == "alert":
         return alert(cfg, args.text, args.quelle)
+    if command == "wachhund":
+        try:
+            zugang = GitHubZugang.from_env()
+        except ConfigError as exc:
+            print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
+            return 1
+        return wachhund(cfg, zugang, args.quelle)
     if command == "selftest":
         return selftest(cfg)
     if command == "testmessage":

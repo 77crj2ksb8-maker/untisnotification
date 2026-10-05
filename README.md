@@ -35,7 +35,8 @@ Montag, 14.09. (heute)
   weniger Stunden, meldet der Bot nicht „alles entfällt", sondern wartet auf
   Bestätigung.
 * **Dauerbetrieb rund um die Uhr** — alle 5 Minuten in der Schulzeit, alle 30
-  Minuten nachts und am Wochenende.
+  Minuten nachts und am Wochenende. Die Laufkette trägt sich selbst, und steht
+  sie doch einmal, wirft der Wachhund sie bei seiner nächsten Runde wieder an.
 
 ## Einrichten
 
@@ -157,7 +158,8 @@ Lauf-Ausgabe, welcher Zugang klemmt. Er ändert nichts — kein Zustand, kein
 Commit, keine Nachricht.
 
 Danach läuft der Bot von allein — rund um die Uhr. Der Zeitplaner stößt die
-Kette an, jeder Lauf überwacht 5,5 Stunden und der nächste steht schon bereit.
+Kette an, jeder Lauf überwacht 5,5 Stunden und meldet seinen Nachfolger selbst
+an.
 Geprüft wird alle 5 Minuten während der Schulzeit, sonst alle 30 Minuten.
 
 ### Der kürzere Weg
@@ -190,6 +192,8 @@ besser sein eigenes Repo ein.
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py alert "..."` | Störmeldung senden (`--quelle` für den Link zum Lauf) |
 | `python bot.py show --days 3` | Stundenplan im Klartext anzeigen |
+| `python bot.py nachfolger --seit <unix-zeit>` | nächsten Überwachungslauf anmelden — nur in GitHub Actions, der Workflow ruft das selbst auf |
+| `python bot.py wachhund` | nachsehen, ob die Laufkette lebt, und sie notfalls anwerfen — nur in GitHub Actions |
 
 `--log DEBUG` und `--version` gibt es zu jedem Befehl.
 
@@ -266,21 +270,30 @@ Zwei Dinge stehen dem Dauerbetrieb im Weg:
 2. **Ein Actions-Job darf höchstens 6 Stunden laufen.** Ein echter
    Dauerprozess ist also gar nicht möglich.
 
-Die Lösung ist eine Kette statt eines Dauerlaufs. Sie beruht auf einer
-Eigenschaft der `concurrency`-Gruppe: Trifft ein Lauf ein, während einer läuft,
-wird er nicht verworfen, sondern **wartet**. Ein bereits wartender Lauf wird
-dabei vom neueren ersetzt — es steht also immer genau einer bereit. Endet der
-laufende, übernimmt der wartende im selben Moment.
+Die Lösung ist eine Kette statt eines Dauerlaufs. Jeder Lauf überwacht 5,5
+Stunden und **meldet am Ende seinen Nachfolger selbst an**. Der reiht sich über
+die `concurrency`-Gruppe als wartender Lauf ein und übernimmt im selben Moment,
+in dem der laufende endet. Ein bereits wartender Lauf wird dabei vom neueren
+ersetzt — es läuft also immer genau einer, und höchstens einer wartet.
 
 ```
 Lauf A  ├────────── 5,5 h ──────────┤
-Cron         ↓ B wartet  ↓ C ersetzt B  ↓ D ersetzt C
-Lauf D                               ├────────── 5,5 h ──────────┤
+                                  ↓ A meldet B an
+Lauf B                              ├────────── 5,5 h ──────────┤
+                                                              ↓ B meldet C an
 ```
 
-Solange der Zeitplaner innerhalb von 5,5 Stunden **auch nur ein einziges Mal**
-auslöst, reißt die Kette nicht ab. Bei rund 10 Auslösungen pro Tag ist das
-reichlich Sicherheitsabstand.
+Bis Version 2.8 hing die Kette allein am Zeitplaner: Er musste während der 5,5
+Stunden wenigstens einmal auslösen, damit ein Nachfolger wartete. Am 05.10. tat
+er das über die gesamte Laufzeit eines Laufs kein einziges Mal — der Lauf
+endete, niemand wartete, die Kette stand. Seither ist der Zeitplaner nur noch
+Rückfallebene: Er startet die Kette in einem frischen Repo und füllt den
+Warteplatz, falls eine Anmeldung einmal scheitert.
+
+Angemeldet wird nur nach einem **erfolgreichen** Lauf, der **mindestens 20
+Minuten** lief. Sonst könnte ein Fehler, der jeden Lauf sofort beendet, eine
+Schleife im Minutentakt erzeugen — jede Runde mit WebUntis-Anmeldung und
+Störmeldung.
 
 Den Takt innerhalb eines Laufs macht der Bot selbst — und zwar nach Tageszeit:
 alle 5 Minuten werktags zwischen 6 und 19 Uhr, sonst alle 30 Minuten. Nachts im
@@ -310,16 +323,23 @@ der Takt verdoppelt (gedeckelt bei 15 Minuten); erst nach sechs Fehlschlägen in
 Folge gibt der Lauf auf. Eine halbstündige WebUntis-Wartung kostet damit drei
 Fehlversuche statt des ganzen 5,5-Stunden-Platzes.
 
-**Es läuft gar nichts mehr** → der Wachhund (`watchdog.yml`) sieht alle vier
-Stunden nach, wann der letzte **geplante** Überwachungslauf begonnen hat. Ist
-das länger als 8 Stunden her, meldet er sich. Genau dieser Fall ist schon
-eingetreten: Die Laufkette stand drei Tage still und fiel nur durch zufälliges
-Nachsehen auf.
+**Es läuft gar nichts mehr** → der Wachhund (`watchdog.yml`) sieht nach, ob
+gerade ein Lauf **läuft oder wartet** — geplant zweimal pro Stunde, tatsächlich
+so oft, wie GitHubs Zeitplaner ihn lässt. Steht die Kette, wirft er
+sie **selbst wieder an** und meldet, seit wann sie stand — du musst nichts tun.
+Ist der letzte Lauf gescheitert, wartet er damit zwei Stunden: Die Störmeldung
+dazu ist schon raus, und bei einem Dauerfehler (Passwort geändert) brächte jeder
+sofortige Neustart nur die nächste Meldung.
 
-Anwerfen lässt sie sich von Hand: *Actions → „Stundenplan pruefen" → Run
-workflow*, **modus** auf `watch` lassen und **minuten** nicht anfassen. Der Standard ist
-der volle 5,5-Stunden-Lauf — genau deshalb, denn erst der hinterlässt wieder
-einen wartenden Lauf. Ein kurzer Lauf endet, und danach steht die Kette wieder.
+Bis 2.8 fragte der Wachhund alle vier Stunden, wann der letzte **geplante** Lauf
+**begonnen** hatte. Gemessen kam er im Median nur alle 6,4 Stunden dran, seine
+Meldung zählte ab dem Auslösen statt ab dem Ende („482 Minuten", als die Kette
+seit gut anderthalb Stunden stand), und anwerfen musste ein Mensch.
+
+Von Hand anwerfen geht weiterhin: *Actions → „Stundenplan pruefen" → Run
+workflow*, **modus** auf `watch` lassen und **minuten** nicht anfassen. Nötig ist
+das nur noch, wenn auch der Neustart durch den Wachhund scheitert — dann sagt
+seine Meldung genau das.
 
 Zwei Grenzen, die kein Code beheben kann:
 
@@ -395,10 +415,11 @@ Die drei Workflows sind bewusst drei Dateien. Sie sind keine Kapitel eines
 Dokuments, sondern drei Systeme mit drei Auslösern, drei Rechten und drei
 Bedeutungen von „rot":
 
-* Der **Wachhund** fragt GitHub, wann der letzte geplante Lauf der Kette
-  begann. Läge er in derselben Datei, zählte er seine eigenen Läufe als
-  Lebenszeichen und meldete „alles in Ordnung", während die Kette längst tot
-  ist. Er braucht außerdem `actions: read`, die Kette `contents: write`.
+* Der **Wachhund** fragt GitHub, ob gerade ein Lauf der Kette läuft oder
+  wartet. Läge er in derselben Datei, wäre er selbst stets ein laufender Lauf
+  — er sähe sich als Lebenszeichen und meldete „alles in Ordnung", während die
+  Kette längst tot ist. Er braucht außerdem keinen Schreibzugriff aufs Repo,
+  die Kette schon.
 * Stünden die **Tests** in derselben Datei, hingen sie an der workflow-weiten
   `concurrency` der Kette. Schlimmer als die Wartezeit von bis zu 5,5
   Stunden: Ein Push-Lauf in dieser Gruppe ersetzte den wartenden Kettenlauf
@@ -463,8 +484,13 @@ vollständig bleibt:
 | `split()` zerreißt die HTML-Auszeichnung nicht | `test_split_zerreisst_die_auszeichnung_nicht` |
 | ein Dauerausfall endet mit Exit 1 (sonst käme keine Störmeldung) | `test_watch_bricht_nach_failure_limit_ab` |
 | jeder `run`-Block der Workflows ist gültige Shell | `test_workflow_shell_ist_syntaktisch_gueltig` |
+| eine abgerissene Laufkette wird erkannt und neu angeworfen | `test_wachhund_erkennt_den_vorfall_vom_05_10` |
+| eine eben beendete Testnachricht ist kein Lebenszeichen der Kette | `test_wachhund_testnachricht_ist_kein_lebenszeichen` |
+| ein Dauerfehler löst keine Meldungsflut aus | `test_wachhund_wartet_nach_fehlschlag` |
+| ein zu kurzer Lauf meldet keinen Nachfolger an (keine Sturmschleife) | `test_nachfolger_kurzer_lauf_meldet_nichts_an` |
+| nur ein erfolgreicher Überwachungslauf meldet einen Nachfolger an | `test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung` |
 
-Der letzte ist aus Schaden entstanden: In 2.3.0 rutschte beim Einfügen des
+Der `run`-Block-Wächter ist aus Schaden entstanden: In 2.3.0 rutschte beim Einfügen des
 Meldeschritts das schließende `fi` des Überwachungsschritts in den neuen
 Schritt. Jeder Lauf wäre vor der ersten Zeile gescheitert — und die
 Störmeldung am selben Fehler mit. Die damalige Abnahme prüfte nur, dass das
@@ -481,6 +507,10 @@ wiederholt was ohnehin dasteht, kann weg.
 * GitHub schaltet geplante Workflows ab, wenn 60 Tage lang kein Commit im Repo
   passiert. Da der Bot selbst committet, erledigt sich das im Schuljahr von
   allein — nach langen Ferien einmal „Enable workflow" klicken.
+* **Anhalten** heißt: den Workflow „Stundenplan pruefen" deaktivieren
+  (*Actions → Stundenplan pruefen → „…" → Disable workflow*). Das respektiert
+  der Wachhund. Einen Lauf nur abzubrechen genügt nicht mehr — dann wirft der
+  Wachhund die Kette bei seiner nächsten Runde wieder an.
 
 ## Nutzungsrechte
 

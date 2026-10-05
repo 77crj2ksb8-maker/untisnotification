@@ -9,6 +9,43 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
+## 2.9.0 — 2026-10-05
+
+**Die Laufkette trägt sich selbst.** Am 05.10. löste GitHubs Zeitplaner während
+der gesamten Laufzeit von Lauf 96 kein einziges Mal aus — der Lauf endete um
+15:38 UTC, kein Nachfolger wartete, die Kette stand, bis der Wachhund sich
+meldete und von Hand neu gestartet wurde. Bis 2.8 war genau das die
+Voraussetzung der Kette.
+
+* **Jeder erfolgreiche Lauf meldet am Ende seinen Nachfolger an**
+  (`workflow_dispatch` über die API). Der Zeitplaner ist nur noch
+  Rückfallebene. Angemeldet wird nur nach Erfolg und nach mindestens
+  20 Minuten Laufzeit, sonst könnte ein Fehler, der jeden Lauf sofort beendet,
+  eine Schleife im Minutentakt auslösen.
+* **Der Wachhund wirft die Kette selbst wieder an.** Er fragt jetzt, ob gerade
+  ein Lauf läuft oder wartet, statt wann der letzte geplante begann. Die alte
+  Frage hätte mit der Selbst-Anmeldung bei jeder Zeitplaner-Dürre Fehlalarm
+  gegeben, und sie maß ab dem Auslösen statt ab dem Ende („482 Minuten" ohne
+  Lauf, als die Kette seit gut anderthalb Stunden stand). Nach einem
+  gescheiterten Lauf wartet er zwei Stunden, damit ein Dauerfehler keine
+  Meldungsflut auslöst.
+* **Der Wachhund sieht zweimal pro Stunde nach** statt alle vier. Gemessen vom
+  24.09. bis 05.10. kam er im Median nur alle 6,4 Stunden dran, im schlimmsten
+  Fall nach 11,2.
+* Seine Entscheidung steht jetzt als reine Funktion in `bot.py` statt als
+  ungetestetes Bash im Workflow; nachgestellt am echten Vorfall entscheidet
+  sie auf Neustart mit „stand seit 17:37 Uhr still — 104 Minuten". Läufe
+  tragen den Modus im Titel (`run-name`), damit eine eben beendete
+  Testnachricht nicht als Lebenszeichen gilt. Ältere Läufe ohne Modus im
+  Titel erkennt er an der Dauer, damit er schon beim ersten Abriss nach dem
+  Umstieg die richtige Uhrzeit nennt.
+* Ist der Kettenworkflow deaktiviert, wirft der Wachhund nichts an und
+  schweigt — so hält man den Bot an. Hat GitHub selbst ihn abgeschaltet, sagt
+  er, wie man ihn wieder einschaltet.
+
+Was bleibt: Fällt GitHub Actions, Telegram oder WebUntis selbst aus, kann der
+Bot das nicht ausgleichen — siehe README, „Wenn etwas schiefgeht".
+
 ## 2.8.2 — 2026-09-24
 
 Nachbesserung nach einem zweiten Review, diesmal von 2.8.1.

@@ -4109,3 +4109,495 @@ def test_main_testmessage(cfg, monkeypatch):
     monkeypatch.setattr(Config, "from_env", staticmethod(lambda **_k: cfg))
     monkeypatch.setattr(bot, "testmessage", lambda c: 0)
     assert bot.main(["testmessage"]) == 0
+
+
+# ===========================================================================
+#  Laufkette  (GitHub-API, nur mit Attrappen)
+# ===========================================================================
+
+#: Der Moment, in dem der Wachhund am 05.10. Alarm schlug.
+VORFALL = dt.datetime(2026, 10, 5, 17, 22, 22, tzinfo=dt.UTC)
+BERLIN = bot.zone_of("Europe/Berlin")
+ZUGANG = bot.GitHubZugang("ghs_geheim123", "besitzer/untisnotification")
+
+
+def gh_lauf(nummer, status="completed", fazit="success",
+            ende="2026-10-05T15:37:59Z", modus="watch", event="workflow_dispatch"):
+    """Ein Eintrag aus workflow_runs, wie die GitHub-API ihn liefert."""
+    return {"run_number": nummer, "status": status,
+            "conclusion": fazit if status == "completed" else None,
+            "updated_at": ende, "event": event,
+            "display_title": f"Stundenplan pruefen · {modus}"}
+
+
+@pytest.mark.parametrize("status", ["in_progress", "queued", "pending",
+                                    "waiting", "requested"])
+def test_wachhund_laufender_oder_wartender_lauf_heisst_ruhig(status):
+    """Laeuft oder wartet ein Lauf, lebt die Kette -- egal, wann der letzte
+    endete. Ein Neustart hier waere harmlos, die Meldung dazu aber falsch."""
+    laeufe = [gh_lauf(98, status=status), gh_lauf(96, ende="2026-10-05T01:00:00Z")]
+    befund = bot.wachhund_befund(laeufe, VORFALL, BERLIN)
+    assert befund.aktion == "ruhig" and not befund.melden
+
+
+def test_wachhund_erkennt_den_vorfall_vom_05_10():
+    """SICHERHEITSNETZ: Genau die Lage vom 05.10. -- Lauf 96 endete um
+    15:37:59 UTC erfolgreich, kein Nachfolger wartete. Der Wachhund muss
+    die Kette neu anwerfen und das melden.
+
+    Die Meldung nennt jetzt, seit wann die Kette stand (17:37 Berliner
+    Zeit, 104 Minuten). Die alte sprach von "482 Minuten" -- gemessen ab
+    dem AUSLOESEN von Lauf 96 um 09:20, nicht ab seinem Ende.
+
+    Mutationstest: in wachhund_befund die letzte Rueckgabe von "neustart"
+    auf "ruhig" aendern -> dieser Test muss rot werden.
+    """
+    laeufe = [gh_lauf(96), gh_lauf(95, ende="2026-10-05T10:12:40Z"),
+              gh_lauf(94, fazit="cancelled", ende="2026-10-05T02:27:09Z")]
+    befund = bot.wachhund_befund(laeufe, VORFALL, BERLIN)
+    assert befund.aktion == "neustart"
+    assert befund.melden
+    assert "17:37 Uhr" in befund.lage and "104 Minuten" in befund.lage
+
+
+def test_wachhund_testnachricht_ist_kein_lebenszeichen():
+    """SICHERHEITSNETZ: Der Fehler, den 2.7.0 behob, darf nicht
+    zurueckkommen. Die Kette steht seit Stunden; eben endete eine
+    Testnachricht. Zaehlte die als Lebenszeichen, schwiege der Wachhund
+    genau an dem Tag, an dem jemand nach einem Aussetzer eine Testnachricht
+    schickt.
+
+    Mutationstest: in wachhund_befund "ist_kettenlauf(lauf) and" aus dem
+    Filter fuer beendete Laeufe entfernen -> dieser Test muss rot werden.
+    """
+    laeufe = [gh_lauf(99, modus="testmessage", ende="2026-10-05T17:21:00Z"),
+              gh_lauf(96)]
+    befund = bot.wachhund_befund(laeufe, VORFALL, BERLIN)
+    assert befund.aktion == "neustart" and befund.melden
+
+
+def test_wachhund_laufende_testnachricht_verdeckt_nur_ihre_minute():
+    """Bewusst so: Fuer "laeuft gerade" zaehlt jeder Lauf. Eine laufende
+    Testnachricht verschiebt den Neustart um eine Wachhund-Runde -- mehr
+    nicht, denn eine Minute spaeter ist sie beendet und zaehlt nicht mehr."""
+    laeufe = [gh_lauf(99, status="in_progress", modus="testmessage"), gh_lauf(96)]
+    assert bot.wachhund_befund(laeufe, VORFALL, BERLIN).aktion == "ruhig"
+
+
+def test_wachhund_wartet_nach_fehlschlag():
+    """SICHERHEITSNETZ: Ein Dauerfehler (Passwort geaendert) soll keine
+    Meldungsflut ausloesen. Der gescheiterte Lauf hat seine Stoermeldung
+    schon geschickt; ein sofortiger Neustart braechte bei jeder
+    Wachhund-Runde -- alle halbe Stunde -- die naechste.
+
+    Mutationstest: in wachhund_befund die Pruefung gegen
+    WACHHUND_FEHLERPAUSE entfernen -> dieser Test muss rot werden.
+    """
+    laeufe = [gh_lauf(98, fazit="failure", ende="2026-10-05T16:52:22Z")]
+    befund = bot.wachhund_befund(laeufe, VORFALL, BERLIN)
+    assert befund.aktion == "warten" and not befund.melden
+
+
+def test_wachhund_versucht_es_nach_der_pause_still_erneut():
+    """Nach der Pause ein neuer Versuch -- aber ohne eigene Meldung:
+    Scheitert der neue Lauf wieder, meldet er sich selbst."""
+    laeufe = [gh_lauf(98, fazit="failure", ende="2026-10-05T14:00:00Z")]
+    befund = bot.wachhund_befund(laeufe, VORFALL, BERLIN)
+    assert befund.aktion == "neustart" and not befund.melden
+
+
+def test_wachhund_zeitlimit_zaehlt_als_fehlschlag():
+    laeufe = [gh_lauf(98, fazit="timed_out", ende="2026-10-05T16:52:22Z")]
+    assert bot.wachhund_befund(laeufe, VORFALL, BERLIN).aktion == "warten"
+
+
+def test_wachhund_abgebrochener_lauf_ist_kein_fehlschlag():
+    """So enden auch die wartenden Laeufe, die ein neuerer ersetzt -- und
+    ein von Hand abgebrochener Lauf. Beides ist kein Fehlschlag mit
+    Stoermeldung; steht die Kette danach, wird neu angeworfen und gemeldet."""
+    laeufe = [gh_lauf(98, fazit="cancelled", ende="2026-10-05T15:00:00Z")]
+    befund = bot.wachhund_befund(laeufe, VORFALL, BERLIN)
+    assert befund.aktion == "neustart" and befund.melden
+
+
+def test_wachhund_kulanz_direkt_nach_dem_ende():
+    """Der Nachfolger eines eben beendeten Laufs kann in der API einen
+    Moment spaeter erscheinen. Ohne Kulanz wuerfe der Wachhund dann eine
+    zweite Kette an."""
+    laeufe = [gh_lauf(98, ende="2026-10-05T17:18:00Z")]
+    assert bot.wachhund_befund(laeufe, VORFALL, BERLIN).aktion == "ruhig"
+
+
+def test_wachhund_ohne_laeufe_wirft_still_an():
+    befund = bot.wachhund_befund([], VORFALL, BERLIN)
+    assert befund.aktion == "neustart" and not befund.melden
+
+
+def test_wachhund_nimmt_den_zuletzt_beendeten_nicht_den_ersten():
+    """Die API sortiert nach Erstellung, nicht nach Ende. Ein frueh
+    angelegter, aber spaet beendeter Lauf ist der juengste Stand."""
+    laeufe = [gh_lauf(99, ende="2026-10-05T12:00:00Z"),
+              gh_lauf(98, ende="2026-10-05T17:15:00Z")]
+    assert bot.wachhund_befund(laeufe, VORFALL, BERLIN).aktion == "ruhig"
+
+
+def test_wachhund_ohne_zeitzone_nennt_utc():
+    befund = bot.wachhund_befund([gh_lauf(96)], VORFALL, None)
+    assert "15:37 UTC" in befund.lage
+
+
+@pytest.mark.parametrize("lauf,erwartet", [
+    (gh_lauf(1, modus="watch"), True),
+    (gh_lauf(1, modus="testmessage"), False),
+    (gh_lauf(1, modus="selftest"), False),
+    # Vor 2.9.0 stand der Modus nicht im Titel; geplant hiess Ueberwachung.
+    ({"display_title": "Stundenplan pruefen", "event": "schedule"}, True),
+    ({"display_title": "Stundenplan pruefen", "event": "workflow_dispatch"}, False),
+])
+def test_ist_kettenlauf(lauf, erwartet):
+    assert bot.ist_kettenlauf(lauf) is erwartet
+
+
+def test_run_name_passt_zur_erkennung_im_wachhund():
+    """Der Lauftitel entsteht im Workflow, erkannt wird er in bot.py.
+    Aendert jemand eine Seite, saehe der Wachhund keine Ueberwachung mehr."""
+    import yaml
+
+    workflow = yaml.safe_load((WURZEL / ".github" / "workflows"
+                               / bot.KETTEN_WORKFLOW).read_text(encoding="utf-8"))
+    vorlage = workflow["run-name"]
+    ausdruck = re.search(r"\$\{\{.*?\}\}", vorlage).group(0)
+    assert vorlage.replace(ausdruck, "watch").endswith(bot.KETTEN_TITEL)
+    assert not vorlage.replace(ausdruck, "testmessage").endswith(bot.KETTEN_TITEL)
+
+
+def test_kettenworkflow_gibt_es():
+    """bot.py meldet Laeufe unter diesem Dateinamen an. Nach einer
+    Umbenennung liefe jede Anmeldung ins Leere."""
+    assert (WURZEL / ".github" / "workflows" / bot.KETTEN_WORKFLOW).is_file()
+
+
+@pytest.mark.parametrize("sekunden,faellig", [
+    (0, False), (19 * 60 + 59, False), (20 * 60, True), (330 * 60, True)])
+def test_nachfolger_faellig_ab_mindestlaufzeit(sekunden, faellig):
+    assert bot.nachfolger_faellig(1000.0, 1000.0 + sekunden) is faellig
+
+
+class GitHubAttrappe:
+    """Ersetzt requests.request und merkt sich jeden Aufruf."""
+
+    def __init__(self, *antworten):
+        self.antworten = list(antworten)
+        self.aufrufe = []
+
+    def __call__(self, method, url, json=None, params=None, timeout=None,
+                 headers=None):
+        self.aufrufe.append({"method": method, "url": url, "json": json,
+                             "params": params, "headers": headers})
+        antwort = self.antworten.pop(0)
+        if isinstance(antwort, Exception):
+            raise antwort
+        return antwort
+
+
+class GitHubAntwort:
+    def __init__(self, payload=None, status=200):
+        self._payload = payload
+        self.status_code = status
+        self.content = b"" if payload is None else b"{}"
+        self.text = "" if payload is None else str(payload)
+
+    def json(self):
+        return self._payload
+
+
+def test_nachfolger_kurzer_lauf_meldet_nichts_an(monkeypatch, capsys):
+    """SICHERHEITSNETZ: Sturmschutz. Ein Lauf, der nach einer Minute mit
+    Erfolg endet, darf keinen Nachfolger anmelden -- sonst wuerde daraus
+    eine Schleife im Minutentakt, jede Runde mit WebUntis-Anmeldung.
+
+    Mutationstest: nachfolger_faellig immer True liefern lassen -> dieser
+    Test muss rot werden.
+    """
+    api = GitHubAttrappe()
+    monkeypatch.setattr(bot.requests, "request", api)
+    assert bot.nachfolger(ZUGANG, seit=1000.0, jetzt=1060.0) == 0
+    assert api.aufrufe == []
+    assert "Sturmschutz" in capsys.readouterr().out
+
+
+def test_nachfolger_meldet_auf_dem_standardzweig_an(monkeypatch):
+    """Immer auf dem Standard-Zweig, mit modus=watch und minuten als
+    Zeichenkette -- workflow_dispatch lehnt Zahlen ab."""
+    api = GitHubAttrappe(GitHubAntwort({"default_branch": "main"}),
+                         GitHubAntwort(None, status=204))
+    monkeypatch.setattr(bot.requests, "request", api)
+    assert bot.nachfolger(ZUGANG, seit=0.0, jetzt=330 * 60.0) == 0
+
+    lesen, anmelden = api.aufrufe
+    assert lesen["method"] == "GET"
+    assert lesen["url"] == "https://api.github.com/repos/besitzer/untisnotification"
+    assert anmelden["method"] == "POST"
+    assert anmelden["url"].endswith("/actions/workflows/check-timetable.yml/dispatches")
+    assert anmelden["json"] == {"ref": "main",
+                                "inputs": {"modus": "watch", "minuten": "330"}}
+    assert anmelden["headers"]["Authorization"] == "Bearer ghs_geheim123"
+
+
+def test_nachfolger_api_fehler_ist_exit_1(monkeypatch, capsys):
+    api = GitHubAttrappe(GitHubAntwort({"message": "Resource not accessible"},
+                                       status=403))
+    monkeypatch.setattr(bot.requests, "request", api)
+    assert bot.nachfolger(ZUGANG, seit=0.0, jetzt=330 * 60.0) == 1
+    assert "HTTP 403" in capsys.readouterr().err
+
+
+def test_github_call_leakt_den_token_nicht(monkeypatch):
+    """Der Token steht im Header, nicht in der URL. Trotzdem: Was in eine
+    Stoermeldung wandern kann, wird nie ungefiltert gebaut."""
+    api = GitHubAttrappe(bot.requests.exceptions.ConnectionError(
+        f"Verbindung abgelehnt, Token {ZUGANG.token}"))
+    monkeypatch.setattr(bot.requests, "request", api)
+    with pytest.raises(bot.GitHubError) as fehler:
+        bot.github_call(ZUGANG, "GET")
+    assert ZUGANG.token not in str(fehler.value)
+
+
+def test_github_call_unlesbare_fehlerantwort(monkeypatch):
+    class Kaputt(GitHubAntwort):
+        def json(self):
+            raise ValueError("kein JSON")
+
+    monkeypatch.setattr(bot.requests, "request",
+                        GitHubAttrappe(Kaputt("<html>502</html>", status=502)))
+    with pytest.raises(bot.GitHubError, match="HTTP 502"):
+        bot.github_call(ZUGANG, "GET")
+
+
+def test_github_zugang_aus_der_umgebung(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghe.example/api/v3/")
+    zugang = bot.GitHubZugang.from_env()
+    assert zugang == bot.GitHubZugang("t", "a/b", "https://ghe.example/api/v3")
+
+
+def test_github_zugang_ohne_token(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
+    with pytest.raises(ConfigError, match="GITHUB_TOKEN"):
+        bot.GitHubZugang.from_env()
+
+
+@pytest.fixture
+def wachhund_welt(monkeypatch):
+    """Lauf-Historie, Anmeldung und Stoermeldung -- alles mitgeschrieben."""
+    welt = {"laeufe": [], "anmelden_fehler": None, "angemeldet": 0,
+            "meldungen": [], "zustand": "active"}
+
+    def fake_call(_zugang, method, pfad="", payload=None, params=None):
+        if pfad.endswith("/runs"):
+            return {"workflow_runs": welt["laeufe"]}
+        if pfad == f"actions/workflows/{bot.KETTEN_WORKFLOW}":
+            return {"state": welt["zustand"]}
+        raise AssertionError(f"unerwarteter Aufruf {method} {pfad}")
+
+    def fake_anmelden(_zugang):
+        if welt["anmelden_fehler"]:
+            raise welt["anmelden_fehler"]
+        welt["angemeldet"] += 1
+        return "main"
+
+    monkeypatch.setattr(bot, "github_call", fake_call)
+    monkeypatch.setattr(bot, "kette_anmelden", fake_anmelden)
+    monkeypatch.setattr(bot, "alert",
+                        lambda _c, text, quelle="": welt["meldungen"].append(text) or 0)
+    return welt
+
+
+def test_wachhund_wirft_abgerissene_kette_an_und_meldet(cfg, wachhund_welt):
+    wachhund_welt["laeufe"] = [gh_lauf(96, ende="2020-01-01T00:00:00Z")]
+    assert bot.wachhund(cfg, ZUGANG) == 0
+    assert wachhund_welt["angemeldet"] == 1
+    (meldung,) = wachhund_welt["meldungen"]
+    assert "neu angeworfen" in meldung and "nichts tun" in meldung
+
+
+def test_wachhund_ruhig_tut_nichts(cfg, wachhund_welt):
+    wachhund_welt["laeufe"] = [gh_lauf(97, status="in_progress")]
+    assert bot.wachhund(cfg, ZUGANG) == 0
+    assert wachhund_welt["angemeldet"] == 0 and wachhund_welt["meldungen"] == []
+
+
+def test_wachhund_neustart_nach_fehlschlag_ohne_eigene_meldung(cfg, wachhund_welt):
+    wachhund_welt["laeufe"] = [gh_lauf(98, fazit="failure",
+                                       ende="2020-01-01T00:00:00Z")]
+    assert bot.wachhund(cfg, ZUGANG) == 0
+    assert wachhund_welt["angemeldet"] == 1 and wachhund_welt["meldungen"] == []
+
+
+def test_wachhund_gescheiterter_neustart_ruft_nach_dem_menschen(cfg, wachhund_welt):
+    """Kann der Wachhund die Kette nicht selbst anwerfen, bleibt nur der
+    Handstart -- und die Anleitung dazu gehoert in die Meldung, denn wer
+    sie auf dem Handy liest, hat das README nicht zur Hand."""
+    wachhund_welt["laeufe"] = [gh_lauf(98, fazit="failure",
+                                       ende="2020-01-01T00:00:00Z")]
+    wachhund_welt["anmelden_fehler"] = bot.GitHubError("HTTP 403: verboten")
+    assert bot.wachhund(cfg, ZUGANG) == 1
+    (meldung,) = wachhund_welt["meldungen"]
+    assert "gescheitert" in meldung and "Run workflow" in meldung
+
+
+def test_wachhund_ohne_historie_ist_exit_1_ohne_meldung(cfg, monkeypatch):
+    def kaputt(*_a, **_k):
+        raise bot.GitHubError("HTTP 500")
+
+    gemeldet = []
+    monkeypatch.setattr(bot, "github_call", kaputt)
+    monkeypatch.setattr(bot, "alert", lambda *a, **k: gemeldet.append(a) or 0)
+    assert bot.wachhund(cfg, ZUGANG) == 1
+    assert gemeldet == []
+
+
+def test_main_nachfolger_braucht_weder_telegram_noch_webuntis(monkeypatch):
+    """Fehlte ein Telegram- oder WebUntis-Wert, risse sonst ausgerechnet
+    die Kette ab -- der Schritt bekommt nur den GitHub-Token."""
+    for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WEBUNTIS_SERVER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
+    gesehen = {}
+    monkeypatch.setattr(
+        bot, "nachfolger",
+        lambda z, seit, jetzt: gesehen.update(seit=seit, repo=z.repo) or 0)
+    assert bot.main(["nachfolger", "--seit", "1234.5"]) == 0
+    assert gesehen == {"seit": 1234.5, "repo": "a/b"}
+
+
+def test_main_nachfolger_ohne_github_zugang(monkeypatch):
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert bot.main(["nachfolger", "--seit", "0"]) == 1
+
+
+def test_main_wachhund_braucht_nur_telegram(cfg, monkeypatch):
+    gesehen = {}
+    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
+    monkeypatch.setattr(Config, "from_env",
+                        staticmethod(lambda telegram_only=False:
+                                     gesehen.setdefault("nur_telegram",
+                                                        telegram_only) or cfg))
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
+    monkeypatch.setattr(bot, "wachhund", lambda c, z, q: 0)
+    assert bot.main(["wachhund"]) == 0
+    assert gesehen["nur_telegram"] is True
+
+
+def ketten_schritte():
+    import yaml
+
+    workflow = yaml.safe_load((WURZEL / ".github" / "workflows"
+                               / bot.KETTEN_WORKFLOW).read_text(encoding="utf-8"))
+    (job,) = workflow["jobs"].values()
+    return workflow, {s.get("name"): (i, s) for i, s in enumerate(job["steps"])}
+
+
+def test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung():
+    """SICHERHEITSNETZ: Ein gescheiterter Lauf darf keinen Nachfolger
+    anmelden -- sonst liefe ein Dauerfehler als Schleife, jede Runde mit
+    Stoermeldung. Und eine Anmeldung, die scheitert, darf den Lauf nicht
+    rot faerben: Das loeste "Stoerung melden" aus, obwohl ueberwacht wurde.
+
+    Mutationstest: im Workflow "success() &&" durch "always() &&" ersetzen
+    -> dieser Test muss rot werden.
+    """
+    workflow, schritte = ketten_schritte()
+    i_ueberwachen, ueberwachen = schritte["Ueberwachen"]
+    i_nachfolger, nachfolger = schritte["Nachfolger anmelden"]
+    i_stoerung, _ = schritte["Stoerung melden"]
+
+    bedingung = nachfolger["if"]
+    assert "success()" in bedingung and "always()" not in bedingung
+    assert "'selftest'" in bedingung and "'testmessage'" in bedingung
+    assert nachfolger["continue-on-error"] is True
+    assert "bot.py nachfolger" in nachfolger["run"]
+    assert "UNTISBOT_START" in ueberwachen["run"]
+    assert i_ueberwachen < i_nachfolger < i_stoerung
+    assert workflow["permissions"]["actions"] == "write"
+
+
+def test_wachhund_workflow_darf_neu_anwerfen():
+    import yaml
+
+    workflow = yaml.safe_load((WURZEL / ".github" / "workflows"
+                               / "watchdog.yml").read_text(encoding="utf-8"))
+    assert workflow["permissions"]["actions"] == "write"
+    (job,) = workflow["jobs"].values()
+    assert any("bot.py wachhund" in s.get("run", "") for s in job["steps"])
+
+
+def test_wachhund_laesst_bewusst_angehaltenen_workflow_in_ruhe(cfg, wachhund_welt):
+    """Wer den Bot anhalten will, deaktiviert den Workflow. Der Wachhund
+    darf dann weder anwerfen noch jede halbe Stunde Alarm schlagen."""
+    wachhund_welt["laeufe"] = [gh_lauf(96, ende="2020-01-01T00:00:00Z")]
+    wachhund_welt["zustand"] = "disabled_manually"
+    assert bot.wachhund(cfg, ZUGANG) == 0
+    assert wachhund_welt["angemeldet"] == 0 and wachhund_welt["meldungen"] == []
+
+
+def test_wachhund_meldet_von_github_abgeschalteten_workflow(cfg, wachhund_welt):
+    wachhund_welt["laeufe"] = [gh_lauf(96, ende="2020-01-01T00:00:00Z")]
+    wachhund_welt["zustand"] = "disabled_inactivity"
+    bot.wachhund(cfg, ZUGANG)
+    assert wachhund_welt["angemeldet"] == 0
+    (meldung,) = wachhund_welt["meldungen"]
+    assert "Enable workflow" in meldung
+
+
+def test_wachhund_alter_handstart_zaehlt_als_ueberwachung():
+    """Der Uebergang: Lauf 97 wurde am 05.10. von Hand neu gestartet, noch
+    ohne Modus im Titel. Endet er ohne Nachfolger, muss der Wachhund SEIN
+    Ende nennen -- nicht das von Lauf 96, fuenf Stunden frueher."""
+    alter_handstart = {"run_number": 97, "status": "completed",
+                       "conclusion": "success", "event": "workflow_dispatch",
+                       "display_title": "Stundenplan pruefen",
+                       "run_started_at": "2026-10-05T17:23:44Z",
+                       "updated_at": "2026-10-05T22:50:00Z"}
+    laeufe = [alter_handstart, gh_lauf(96, event="schedule")]
+    befund = bot.wachhund_befund(laeufe, dt.datetime(2026, 10, 6, 0, 0, tzinfo=dt.UTC),
+                                 BERLIN)
+    assert "00:50 Uhr" in befund.lage
+
+
+def test_wachhund_alte_testnachricht_ist_keine_ueberwachung():
+    alte_testnachricht = {"display_title": "Stundenplan pruefen",
+                          "event": "workflow_dispatch",
+                          "run_started_at": "2026-10-05T12:00:00Z",
+                          "updated_at": "2026-10-05T12:01:10Z"}
+    assert bot.ist_kettenlauf(alte_testnachricht) is False
+
+
+@pytest.mark.parametrize("antwort", [
+    GitHubAntwort({}),                         # kein default_branch
+    GitHubAntwort(["kein", "objekt"]),         # Liste statt Objekt
+])
+def test_kette_anmelden_unerwartete_antwort_ist_github_error(monkeypatch, antwort):
+    """Nur GitHubError faengt der Wachhund ab und schickt dann die Anleitung
+    zum Handstart. Ein KeyError liesse ihn stumm abstuerzen -- genau dann,
+    wenn die Kette steht."""
+    monkeypatch.setattr(bot.requests, "request", GitHubAttrappe(antwort))
+    with pytest.raises(bot.GitHubError):
+        bot.kette_anmelden(ZUGANG)
+
+
+def test_github_call_kaputtes_json_ist_github_error(monkeypatch):
+    class KaputtesJson(GitHubAntwort):
+        def json(self):
+            raise ValueError("kein JSON")
+
+    monkeypatch.setattr(bot.requests, "request",
+                        GitHubAttrappe(KaputtesJson({"x": 1}, status=200)))
+    with pytest.raises(bot.GitHubError, match="unlesbare Antwort"):
+        bot.github_call(ZUGANG, "GET")

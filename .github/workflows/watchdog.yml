@@ -4,18 +4,26 @@ name: Wachhund
 # nicht beschweren; und warum der Wachhund an derselben Cron-Mechanik haengt,
 # die er bewacht: README.md, Abschnitt "Wenn etwas schiefgeht".
 #
-# Was hier bleibt, ist die Mechanik: wie er das Lebenszeichen ermittelt und
-# warum die Abfrage genau so aussieht.
+# Die Entscheidung selbst steht in bot.py (wachhund_befund) und ist dort
+# getestet. Bis 2.8 stand sie hier als Bash -- ungetestet, und mit einer
+# Frage, die seit der Selbst-Anmeldung der Kette Fehlalarm gaebe.
 
 on:
   schedule:
-    # Alle 4 Stunden zu einer krummen Minute. Volle und halbe Stunden sind
-    # bei GitHub am staerksten ueberbucht und werden am ehesten verworfen.
-    - cron: "37 */4 * * *"
+    # Zweimal pro Stunde, zu krummen Minuten: Volle und halbe Stunden sind
+    # bei GitHub am staerksten ueberbucht. Frueher stand hier "alle 4
+    # Stunden" -- gemessen vom 24.09. bis 05.10. kamen die Laeufe im Median
+    # alle 6,4 Stunden, im schlimmsten Fall nach 11,2. Der Wachhund leidet
+    # unter derselben Duerre wie die Kette; mehr Gelegenheiten sind das
+    # einzige Mittel dagegen. Ein ruhiger Lauf dauert Sekunden und meldet
+    # nichts.
+    - cron: "17,47 * * * *"
   workflow_dispatch:
 
 permissions:
-  actions: read          # noetig, um die Lauf-Historie zu lesen
+  # Lesen fuer die Lauf-Historie, Schreiben fuer den Neustart: Steht die
+  # Kette, wirft der Wachhund sie selbst wieder an.
+  actions: write
 
 concurrency:
   group: untisbot-wachhund
@@ -37,59 +45,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Letzten Ueberwachungslauf pruefen
+      - name: Laufkette pruefen
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           # Absichtlich NUR die Telegram-Werte: Eine Stoermeldung braucht
           # kein WebUntis, siehe Config.from_env(telegram_only=True).
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          set -euo pipefail
-
-          # Neuester GEPLANTER Lauf, unabhaengig vom Status: Ein gerade
-          # laufender ist das beste Lebenszeichen, das es gibt.
-          #
-          # event=schedule ist wichtig. Ohne den Filter zaehlte auch ein von
-          # Hand gestarteter testmessage- oder selftest-Lauf als Lebenszeichen
-          # -- der dauert eine Minute und haelt die Kette gerade nicht am
-          # Leben. Genau am Tag, an dem jemand nach einem Aussetzer eine
-          # Testnachricht schickt, schwiege der Wachhund.
-          #
-          # Umgekehrt entsteht kein Fehlalarm: Die Kette lebt nur, solange der
-          # Zeitplaner ausloest. Tut er es 8 Stunden lang nicht, steht kein
-          # Nachfolger bereit und die Kette endet mit dem laufenden Lauf --
-          # dann ist die Meldung richtig.
-          letzter=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/check-timetable.yml/runs?event=schedule&per_page=1" \
-            --jq '.workflow_runs[0].run_started_at // empty')
-
-          if [ -z "$letzter" ]; then
-            echo "Noch kein einziger Lauf vorhanden -- nichts zu melden."
-            exit 0
-          fi
-
-          alter=$(( ( $(date -u +%s) - $(date -u -d "$letzter" +%s) ) / 60 ))
-          echo "Letzter Lauf begann $letzter, das sind $alter Minuten her."
-
-          # 8 Stunden. Ein Lauf dauert 5,5 Stunden und der naechste soll
-          # nahtlos uebernehmen; 480 Minuten lassen also reichlich Luft,
-          # bevor von einem echten Stillstand auszugehen ist.
-          if [ "$alter" -gt 480 ]; then
-            # Der Hinweis gehoert in die Meldung selbst. Wer sie abends auf
-            # dem Handy liest, hat das README nicht zur Hand -- und
-            # ohne Handstart wartet die Kette darauf, dass der Zeitplaner
-            # sich von selbst erbarmt.
-            #
-            # Die Leerzeile kommt aus printf, nicht aus dem YAML: Eine echte
-            # Leerzeile im Text wuerde hier den Block-Skalar beenden, und
-            # zwar lautlos -- YAML liest den Rest dann als neuen Schluessel.
-            meldung=$(printf '%s\n\n%s' \
-              "Seit $alter Minuten hat kein Überwachungslauf mehr begonnen. Die Laufkette ist abgerissen — Stundenplanänderungen werden gerade nicht gemeldet." \
-              "Wieder anwerfen: Actions → „Stundenplan pruefen“ → Run workflow, modus auf watch lassen und minuten nicht anfassen.")
-
-            python bot.py alert "$meldung" \
-              --quelle "Wachhund · $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions"
-          else
-            echo "Alles in Ordnung."
-          fi
+          python bot.py wachhund \
+            --quelle "Wachhund · $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions"

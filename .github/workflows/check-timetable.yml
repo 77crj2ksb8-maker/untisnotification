@@ -1,4 +1,10 @@
 name: Stundenplan pruefen
+# Der Modus im Lauftitel ist mehr als Kosmetik: Daran erkennt der Wachhund
+# eine Ueberwachung (bot.py, ist_kettenlauf). Eine Testnachricht, die eben
+# endete, darf ihm nicht als Lebenszeichen der Kette gelten. Derselbe
+# Ausdruck wie im concurrency-Gruppennamen -- der ist bei geplanten Laeufen
+# (keine Inputs) seit dem ersten Tag erprobt.
+run-name: "Stundenplan pruefen · ${{ github.event.inputs.modus || 'watch' }}"
 
 # WARUM DIE KETTE SO AUSSIEHT -- der unzuverlaessige Zeitplaner, die
 # 6-Stunden-Grenze eines Jobs und die concurrency-Gruppe, die beides
@@ -9,9 +15,10 @@ name: Stundenplan pruefen
 
 on:
   schedule:
-    # Alle 30 Minuten, rund um die Uhr, an jedem Tag. Der Zeitplaner ist
-    # hier nur noch das Anlasserkabel: Er muss die Kette starten und nach
-    # einem Abriss neu anwerfen, nicht mehr jeden einzelnen Check ausloesen.
+    # Alle 30 Minuten, rund um die Uhr. Seit 2.9 traegt sich die Kette
+    # selbst (Schritt "Nachfolger anmelden"), der Zeitplaner ist nur noch
+    # Rueckfallebene: Er startet die Kette in einem frischen Repo und
+    # fuellt den Warteplatz, falls eine Anmeldung einmal scheitert.
     - cron: "0,30 * * * *"
   workflow_dispatch:
     inputs:
@@ -41,6 +48,7 @@ on:
 
 permissions:
   contents: write        # noetig, um state.json zurueckzuschreiben
+  actions: write         # noetig, um den Nachfolger anzumelden
 
 concurrency:
   # Diese Gruppe ist das Herz des Dauerbetriebs (README.md, "Wie es
@@ -112,6 +120,9 @@ jobs:
           LOOKAHEAD_DAYS: "7"
           TIMEZONE: "Europe/Berlin"
         run: |
+          # Fuer den Sturmschutz in "Nachfolger anmelden": Nur wer lange
+          # genug lief, meldet einen Nachfolger an.
+          echo "UNTISBOT_START=$(date +%s)" >> "$GITHUB_ENV"
           case "${{ github.event.inputs.modus }}" in
             selftest)
               # Kein git config noetig: selftest schreibt nichts, weder
@@ -134,6 +145,29 @@ jobs:
                 --night-interval 1800
               ;;
           esac
+
+      # Der Kern der Laufkette: Jeder erfolgreiche Lauf meldet seinen
+      # Nachfolger selbst an, statt darauf zu hoffen, dass der Zeitplaner
+      # waehrend der 5,5 Stunden wenigstens einmal ausloest. Am 05.10. tat
+      # er das nicht -- Lauf 96 endete, kein Nachfolger wartete, die Kette
+      # stand, bis der Wachhund sich meldete.
+      #
+      # Nur nach Erfolg: Ein gescheiterter Lauf meldet keinen an, sonst
+      # liefe ein Dauerfehler (Passwort geaendert) als Schleife, jede Runde
+      # mit Stoermeldung. Den Neustart nach Fehlschlaegen uebernimmt der
+      # Wachhund, mit Pause. Dazu die Mindestlaufzeit in bot.py.
+      #
+      # continue-on-error: Scheitert die Anmeldung, faellt die Kette auf
+      # Zeitplaner und Wachhund zurueck. Kein Grund fuer eine Stoermeldung.
+      - name: Nachfolger anmelden
+        if: >-
+          success() &&
+          github.event.inputs.modus != 'selftest' &&
+          github.event.inputs.modus != 'testmessage'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python bot.py nachfolger --seit "$UNTISBOT_START"
 
       # Meldet sich selbst, statt darauf zu hoffen, dass jemand in den
       # Actions-Tab schaut. Greift bei allem, was den Lauf scheitern
