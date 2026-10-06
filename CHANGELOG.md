@@ -9,6 +9,18 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
+## 2.12.0 — 2026-10-06
+
+**`/tomorrow` schickt den Plan für morgen.** Gleiche Darstellung wie `/today`,
+auch als `/morgen`, und im Befehlsmenü. Steht morgen nichts im Plan, kommt der
+nächste Schultag der folgenden sieben Tage mit dem Hinweis „Morgen stehen keine
+Stunden im Plan" — Freitagabend also gleich der Montag. Ein Tag, an dem alles
+ausfällt, zählt als Schultag: Genau dieser Ausfall ist dann die Antwort. In
+den Ferien bleibt es bei „Keine Stunden im Plan" statt eines Plans in zwei
+Wochen. Ein einziger WebUntis-Abruf für die ganze Woche. Ein neuer Test hält
+Menü, Hilfe und Kurzformen deckungsgleich. Dazu die Actions auf
+`checkout@v7` und `setup-python@v7` (Dependabot).
+
 ## 2.11.0 — 2026-10-06
 
 **`/today` schickt die Tagesübersicht.** Bis hierher sprach der Bot nur, jetzt

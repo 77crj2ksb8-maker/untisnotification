@@ -36,7 +36,9 @@ Montag, 14.09. (heute)
   Bestätigung.
 * **Tagesübersicht auf Zuruf** — `/today` (oder `/heute`) im Chat schickt den
   heutigen Stundenplan, frisch aus WebUntis: Doppelstunden zusammengefasst,
-  Ausfälle und Änderungen markiert. Antwortet nur in den eingetragenen Chats.
+  Ausfälle und Änderungen markiert. `/tomorrow` (oder `/morgen`) dasselbe für
+  morgen — und Freitagabend gleich für Montag. Antwortet nur in den
+  eingetragenen Chats.
 * **Dauerbetrieb rund um die Uhr** — alle 5 Minuten in der Schulzeit, alle 30
   Minuten nachts und am Wochenende. Die Laufkette trägt sich selbst, und steht
   sie doch einmal, wirft der Wachhund sie bei seiner nächsten Runde wieder an.
@@ -194,7 +196,7 @@ besser sein eigenes Repo ein.
 |---|---|
 | `python bot.py check` | einmal prüfen, melden, Zustand sichern |
 | `python bot.py check --dry-run` | prüfen und die Nachricht ausgeben, ohne zu senden oder zu speichern |
-| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst. `--befehle` beantwortet in den Pausen `/today` |
+| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst. `--befehle` beantwortet in den Pausen `/today` und `/tomorrow` |
 | `python bot.py selftest` | jeden Zugang einzeln durchtesten und sagen, was klemmt |
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py alert "..."` | Störmeldung senden (`--quelle` für den Link zum Lauf) |
@@ -208,9 +210,10 @@ besser sein eigenes Repo ein.
 | Nachricht an den Bot | Antwort |
 |---|---|
 | `/today` oder `/heute` | der heutige Stundenplan: Zeiten, Fächer, Räume, Ausfälle und Änderungen markiert |
+| `/tomorrow` oder `/morgen` | dasselbe für morgen. Steht morgen nichts im Plan (Wochenende, Brückentag), kommt der nächste Schultag der kommenden Woche — mit Hinweis |
 | jeder andere `/`-Befehl | kurze Hilfe |
 
-`/today` steht nach dem ersten Lauf auch im Befehlsmenü von Telegram. Der Bot
+Beide Befehle stehen nach dem ersten Lauf auch im Befehlsmenü von Telegram. Der Bot
 antwortet nur in den Chats aus `TELEGRAM_CHAT_ID` — finden und anschreiben kann
 ihn jeder, deinen Stundenplan abfragen nicht. Wie schnell die Antwort kommt,
 steht unter [Wie es läuft](#wie-es-läuft).
@@ -330,8 +333,8 @@ vollständige WebUntis-Anmeldung. Verpasst wird dabei nichts — was um 2 Uhr
 nachts eingetragen wird, steht spätestens eine halbe Stunde später im Chat.
 
 Die Pausen zwischen zwei Prüfungen verschläft der Bot nicht: Er hält eine
-Anfrage an Telegram offen (Long-Polling) und beantwortet `/today`, sobald es
-eintrifft — nach Sekunden. Nur während einer laufenden Prüfung oder einer
+Anfrage an Telegram offen (Long-Polling) und beantwortet `/today` oder
+`/tomorrow`, sobald es eintrifft — nach Sekunden. Nur während einer laufenden Prüfung oder einer
 Übergabe zwischen zwei Läufen dauert es einen Moment länger. Steht die Kette,
 bleibt der Befehl liegen; nach 15 Minuten verfällt er, damit nicht am nächsten
 Morgen die Antwort auf eine Frage vom Vorabend kommt.
@@ -582,7 +585,7 @@ wiederholt was ohnehin dasteht, kann weg.
   (*Actions → Stundenplan pruefen → „…" → Disable workflow*). Das respektiert
   der Wachhund. Einen Lauf nur abzubrechen genügt nicht: Sein wartender
   Nachfolger übernimmt sofort, und sonst wirft der Wachhund die Kette wieder an.
-* `/today` braucht getUpdates — das geht nicht, solange am Bot ein **Webhook**
+* `/today` und `/tomorrow` brauchen getUpdates — das geht nicht, solange am Bot ein **Webhook**
   eingetragen ist. Wer den Bot zusätzlich anderswo nutzt, merkt das an einer
   Warnung „Postfach" im Lauf-Log; die Änderungsmeldungen laufen unberührt
   weiter.

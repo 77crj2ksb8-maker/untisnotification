@@ -2600,6 +2600,7 @@ class FakeUntis:
         self.periods = periods or {}
         self.fehler = fehler
         self.timegrid_fehler = timegrid_fehler
+        self.abrufe = []
 
     def __call__(self, _cfg):
         return self
@@ -2610,7 +2611,8 @@ class FakeUntis:
     def __exit__(self, *_a):
         return False
 
-    def timetable(self, _start, _end):
+    def timetable(self, start, end):
+        self.abrufe.append((start, end))
         if self.fehler:
             raise self.fehler
         return self.lessons
@@ -4902,7 +4904,7 @@ def test_github_call_kaputtes_json_ist_github_error(monkeypatch):
 
 
 # ===========================================================================
-#  Befehle aus Telegram: /today
+#  Befehle aus Telegram: /today, /tomorrow
 # ===========================================================================
 
 def test_tagesuebersicht_fasst_doppelstunden_zusammen():
@@ -5003,6 +5005,59 @@ def test_tagesuebersicht_passt_durch_split():
     assert bot.split(text) == [text]
 
 
+FR, SA, SO = dt.date(2026, 9, 18), dt.date(2026, 9, 19), dt.date(2026, 9, 20)
+NAECHSTER_MO = "2026-09-21"
+
+
+def test_naechster_schultag_morgen_ist_schule():
+    stunden = [lesson(date=DI, uid=1), lesson(date=MI, uid=2)]
+    assert bot.naechster_schultag(stunden, dt.date(2026, 9, 15)) == dt.date(2026, 9, 15)
+
+
+def test_naechster_schultag_springt_uebers_wochenende():
+    stunden = [lesson(date=NAECHSTER_MO, uid=1)]
+    assert bot.naechster_schultag(stunden, SA) == dt.date(2026, 9, 21)
+
+
+def test_naechster_schultag_ausfall_zaehlt_als_schultag():
+    """Faellt morgen alles aus, ist genau das die Antwort -- nicht der Plan
+    von uebermorgen, sonst ginge der Ausfall unter."""
+    stunden = [lesson(date=DI, status=CANCELLED, uid=1), lesson(date=MI, uid=2)]
+    assert bot.naechster_schultag(stunden, dt.date(2026, 9, 15)) == dt.date(2026, 9, 15)
+
+
+def test_naechster_schultag_schaut_nur_eine_woche_voraus():
+    """In den Ferien kein Plan von in zwei Wochen: dann bleibt es bei morgen."""
+    weit = SA + dt.timedelta(days=bot.SCHULTAG_SUCHE)
+    knapp = SA + dt.timedelta(days=bot.SCHULTAG_SUCHE - 1)
+    assert bot.naechster_schultag([lesson(date=weit.isoformat())], SA) == SA
+    assert bot.naechster_schultag([lesson(date=knapp.isoformat())], SA) == knapp
+    assert bot.naechster_schultag([], SA) == SA
+
+
+def test_morgenuebersicht_zeigt_morgen():
+    stunden = [lesson(date=DI, uid=1), lesson(date=MI, subjects=("E",), uid=2)]
+    text = bot.morgenuebersicht(stunden, dt.date(2026, 9, 15), RASTER,
+                                dt.datetime(2026, 9, 14, 20, 15))
+    assert text.startswith("<b>📅 Dienstag, 15.09.</b>")
+    assert "<b>M</b>" in text and "<b>E</b>" not in text
+    assert "nächste Schultag" not in text
+    assert "Stand 20:15 Uhr" in text
+
+
+def test_morgenuebersicht_freitagabend_zeigt_montag_mit_hinweis():
+    stunden = [lesson(date=NAECHSTER_MO, uid=1)]
+    text = bot.morgenuebersicht(stunden, SA, RASTER)
+    assert text.startswith("<i>Morgen stehen keine Stunden im Plan. "
+                           "Der nächste Schultag:</i>\n\n<b>📅 Montag, 21.09.</b>")
+    assert "<b>1.</b> 07:40–08:25 · <b>M</b>" in text
+
+
+def test_morgenuebersicht_ferien_ohne_hinweis():
+    text = bot.morgenuebersicht([], SA, RASTER)
+    assert text == "<b>📅 Samstag, 19.09.</b>\nKeine Stunden im Plan."
+
+
 UNIX_JETZT = 1_800_000_000.0
 
 
@@ -5049,7 +5104,8 @@ def test_befehle_aus_ignoriert_alte_befehle():
 @pytest.mark.parametrize("text,befehl", [
     ("/today", "today"), ("/TODAY", "today"), ("/today@MeinUntisBot", "today"),
     ("/today bitte", "today"), ("/heute", "today"), ("/start", "start"),
-    ("/", "")])
+    ("/tomorrow", "tomorrow"), ("/Tomorrow@MeinUntisBot", "tomorrow"),
+    ("/morgen", "tomorrow"), ("/", "")])
 def test_befehle_aus_schreibweisen(text, befehl):
     abholung = bot.befehle_aus([update(1, text)], ("42",), UNIX_JETZT)
     assert abholung.befehle == (("42", befehl),)
@@ -5115,7 +5171,8 @@ def telegram_welt(monkeypatch):
         welt = TelegramWelt(*abholungen, fehler=fehler)
         monkeypatch.setattr(bot, "telegram_call", welt)
         monkeypatch.setattr(bot, "tagesuebersicht_holen",
-                            lambda _cfg: "<b>📅 Montag</b>")
+                            lambda _cfg, morgen=False:
+                            "<b>📅 Dienstag</b>" if morgen else "<b>📅 Montag</b>")
         return welt
     return bauen
 
@@ -5129,11 +5186,25 @@ def test_postfach_beantwortet_today_im_richtigen_chat(cfg, telegram_welt):
     assert ("getUpdates", {"offset": 8, "timeout": 0}) in welt.aufrufe
 
 
+def test_postfach_beantwortet_tomorrow_mit_morgen(cfg, telegram_welt):
+    welt = telegram_welt([update(7, "/tomorrow"), update(8, "/today")])
+    welt.postfach(cfg).warten(120)
+    assert welt.gesendet == [("42", "<b>📅 Dienstag</b>"), ("42", "<b>📅 Montag</b>")]
+
+
 def test_postfach_beantwortet_unbekanntes_mit_hilfe(cfg, telegram_welt):
     welt = telegram_welt([update(7, "/start")])
     welt.postfach(cfg).warten(120)
     ((chat, text),) = welt.gesendet
     assert chat == "42" and "/today" in text
+
+
+def test_hilfe_nennt_jeden_befehl():
+    """Wer /start schreibt, soll jeden Befehl aus dem Menue auch in der
+    Hilfe finden -- ein neuer Befehl darf dort nicht fehlen."""
+    for befehl, beschreibung in bot.BEFEHLE.items():
+        assert f"/{befehl} – {beschreibung}" in bot.HILFE
+    assert set(bot.BEFEHL_ALIAS.values()) <= set(bot.BEFEHLE)
 
 
 def test_postfach_haelt_die_wartezeit_ein(cfg, telegram_welt):
@@ -5216,7 +5287,8 @@ def test_postfach_setzt_das_befehlsmenue_einmal(cfg, telegram_welt):
     postfach.warten(120)
     menues = [a for a in welt.aufrufe if a[0] == "setMyCommands"]
     assert menues == [("setMyCommands", {"commands": [
-        {"command": "today", "description": "Stundenplan von heute"}]})]
+        {"command": "today", "description": "Stundenplan von heute"},
+        {"command": "tomorrow", "description": "Stundenplan von morgen"}]})]
 
 
 def test_tagesuebersicht_holen_frisch_aus_webuntis(cfg, monkeypatch):
@@ -5241,6 +5313,40 @@ def test_tagesuebersicht_holen_webuntis_weg(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis",
                         FakeUntis(fehler=bot.UntisError("Server weg")))
     assert "WebUntis antwortet gerade nicht" in bot.tagesuebersicht_holen(cfg)
+    assert "WebUntis antwortet gerade nicht" in bot.tagesuebersicht_holen(
+        cfg, morgen=True)
+
+
+def test_tagesuebersicht_holen_heute_nur_einen_tag(cfg, monkeypatch):
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 14, 6, 50))
+    untis = FakeUntis([lesson()], periods=RASTER)
+    monkeypatch.setattr(bot, "Untis", untis)
+    bot.tagesuebersicht_holen(cfg)
+    assert untis.abrufe == [(dt.date(2026, 9, 14), dt.date(2026, 9, 14))]
+
+
+def test_tagesuebersicht_holen_morgen_holt_eine_woche(cfg, monkeypatch):
+    """Ein Abruf fuer morgen und die Tage danach: Ist morgen frei, steht der
+    naechste Schultag schon in derselben Antwort."""
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 18, 21, 30))   # Freitag
+    untis = FakeUntis([lesson(date=NAECHSTER_MO, rooms=("R1",))], periods=RASTER)
+    monkeypatch.setattr(bot, "Untis", untis)
+    text = bot.tagesuebersicht_holen(cfg, morgen=True)
+    assert untis.abrufe == [(SA, SA + dt.timedelta(days=bot.SCHULTAG_SUCHE - 1))]
+    assert "Der nächste Schultag" in text and "Montag, 21.09." in text
+    assert "<b>1.</b> 07:40–08:25 · <b>M</b> · R1" in text
+    assert "Stand 21:30 Uhr" in text
+
+
+def test_tagesuebersicht_holen_morgen_in_den_ferien(cfg, monkeypatch):
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 18, 21, 30))
+    monkeypatch.setattr(bot, "Untis",
+                        FakeUntis(fehler=bot.NothingToDo("Ferien")))
+    text = bot.tagesuebersicht_holen(cfg, morgen=True)
+    assert text.startswith("<b>📅 Samstag, 19.09.</b>\nKeine Stunden im Plan.")
 
 
 def test_telegram_call_ein_versuch_wartet_nicht(monkeypatch):

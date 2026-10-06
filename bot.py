@@ -20,7 +20,7 @@ Aufrufe:
     python bot.py check              einmal pruefen
     python bot.py watch              5,5 Stunden lang im Takt pruefen
     python bot.py watch --kette      ... und den naechsten Lauf anmelden
-    python bot.py watch --befehle    ... und in den Pausen /today beantworten
+    python bot.py watch --befehle    ... und in den Pausen /today, /tomorrow beantworten
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py alert "..."        Stoermeldung senden
@@ -63,7 +63,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.11.0"
+VERSION = "2.12.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -1427,6 +1427,44 @@ def tagesuebersicht(lessons: Sequence[Lesson], tag: dt.date,
     return "\n".join(zeilen)
 
 
+#: So weit schaut /tomorrow voraus, wenn morgen nichts im Plan steht: eine
+#: Woche reicht ueber Wochenende und Brueckentage. Ferien nicht -- wer in den
+#: Herbstferien fragt, will nicht den Plan von in zwei Wochen.
+SCHULTAG_SUCHE = 7                            # Tage
+
+
+def naechster_schultag(lessons: Sequence[Lesson], ab: dt.date,
+                       tage: int = SCHULTAG_SUCHE) -> dt.date:
+    """Der erste Tag ab `ab` mit Stunden im Plan; ohne Treffer `ab`. Rein.
+
+    Ausgefallene Stunden zaehlen mit: Faellt morgen alles aus, ist genau
+    das die Antwort -- nicht der Plan von uebermorgen.
+    """
+    belegt = {lesson.date for lesson in lessons}
+    for i in range(tage):
+        tag = ab + dt.timedelta(days=i)
+        if tag.isoformat() in belegt:
+            return tag
+    return ab
+
+
+def morgenuebersicht(lessons: Sequence[Lesson], morgen: dt.date,
+                     periods: Periods | None = None,
+                     stand: dt.datetime | None = None) -> str:
+    """Der Plan fuer morgen als Telegram-Nachricht (Befehl /tomorrow). Rein.
+
+    Freitagabend ist "morgen" ein Samstag, und eine leere Antwort hilft da
+    niemandem. Steht morgen nichts im Plan, kommt deshalb der naechste
+    Schultag -- mit Hinweis, damit niemand den Montag fuer morgen haelt.
+    """
+    tag = naechster_schultag(lessons, morgen)
+    text = tagesuebersicht(lessons, tag, periods, stand)
+    if tag != morgen:
+        text = ("<i>Morgen stehen keine Stunden im Plan. "
+                f"Der nächste Schultag:</i>\n\n{text}")
+    return text
+
+
 #: Telegrams harte Grenze. Steht hier, obwohl der Code sie nie liest:
 #: Sie ist die Begruendung fuer SPLIT_AT, und ein Test haelt den Abstand
 #: fest. Ohne sie waere die 3500 eine Zahl ohne Herkunft.
@@ -2427,7 +2465,7 @@ def lebenszeichen(url: str) -> bool:
 
 
 # ===========================================================================
-#  Befehle aus Telegram  -- /today
+#  Befehle aus Telegram  -- /today, /tomorrow
 # ===========================================================================
 #
 # Bis 2.10 sprach der Bot nur, er hoerte nie zu. Jetzt lauscht er in der
@@ -2450,13 +2488,15 @@ BEFEHL_MAX_ALTER = 15 * 60                    # Sekunden
 POSTFACH_FEHLERGRENZE = 5
 
 #: Das Befehlsmenue in Telegram (setMyCommands): Befehl -> Beschreibung.
-BEFEHLE = {"today": "Stundenplan von heute"}
+BEFEHLE = {"today": "Stundenplan von heute",
+           "tomorrow": "Stundenplan von morgen"}
 
 #: Weitere Schreibweisen fuer denselben Befehl.
-BEFEHL_ALIAS = {"heute": "today"}
+BEFEHL_ALIAS = {"heute": "today", "morgen": "tomorrow"}
 
 HILFE = ("Ich melde Änderungen am Stundenplan von selbst.\n"
-         "/today – Stundenplan von heute")
+         "/today – Stundenplan von heute\n"
+         "/tomorrow – Stundenplan von morgen")
 
 
 @dataclass(frozen=True)
@@ -2515,19 +2555,24 @@ def befehle_aus(updates: Sequence[Any], chats: Iterable[str],
     return Abholung(tuple(befehle), offset, tuple(fremde))
 
 
-def tagesuebersicht_holen(cfg: Config) -> str:
-    """Der heutige Plan, frisch aus WebUntis -- nicht aus state.json.
+def tagesuebersicht_holen(cfg: Config, morgen: bool = False) -> str:
+    """Der Plan von heute oder morgen, frisch aus WebUntis -- nicht aus
+    state.json.
 
     Der gespeicherte Zustand ist bis zu einen Takt alt und bleibt bei einer
     gemerkten Ausnahmelage absichtlich stehen. Auf eine Frage gehoert der
     Plan, wie er jetzt ist.
+
+    Fuer morgen gleich eine ganze Woche: Ist morgen frei, steht der naechste
+    Schultag schon in derselben Antwort -- ein Abruf statt bis zu sieben.
     """
     jetzt = now_local(cfg.timezone)
-    heute = jetzt.date()
+    tag = jetzt.date() + dt.timedelta(days=1 if morgen else 0)
+    bis = tag + dt.timedelta(days=SCHULTAG_SUCHE - 1 if morgen else 0)
     try:
         with Untis(cfg) as untis:
             try:
-                lessons = untis.timetable(heute, heute)
+                lessons = untis.timetable(tag, bis)
             except NothingToDo:
                 lessons = []              # Wochenende, Ferien
             periods = untis.timegrid()
@@ -2535,7 +2580,9 @@ def tagesuebersicht_holen(cfg: Config) -> str:
         log.warning("Tagesuebersicht nicht abrufbar: %s", exc)
         return ("WebUntis antwortet gerade nicht — versuch es in ein paar "
                 "Minuten noch einmal.")
-    return tagesuebersicht(lessons, heute, periods, jetzt)
+    if morgen:
+        return morgenuebersicht(lessons, tag, periods, jetzt)
+    return tagesuebersicht(lessons, tag, periods, jetzt)
 
 
 class Postfach:
@@ -2615,7 +2662,12 @@ class Postfach:
 
     def _antworten(self, chat: str, befehl: str) -> None:
         try:
-            text = tagesuebersicht_holen(self.cfg) if befehl == "today" else HILFE
+            if befehl == "today":
+                text = tagesuebersicht_holen(self.cfg)
+            elif befehl == "tomorrow":
+                text = tagesuebersicht_holen(self.cfg, morgen=True)
+            else:
+                text = HILFE
             for teil in split(text):
                 _send_chunk(self.cfg, chat, teil, silent=False)
         except Exception as exc:
