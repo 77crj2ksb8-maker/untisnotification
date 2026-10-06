@@ -66,14 +66,20 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Festes Image statt ubuntu-latest: Das Label wandert ab 19.10.2026 auf
+    # Ubuntu 26.04, ohne dass sich in diesem Repo etwas aendert. Bei einem
+    # Bot, der rund um die Uhr laeuft, soll ein Wechsel des Betriebssystems
+    # eine bewusste Aenderung mit gruener CI sein, keine Ueberraschung.
+    # Alle drei Workflows nutzen dasselbe Image -- sonst prueft CI etwas
+    # anderes als das, was im Betrieb laeuft (getestet).
+    runs-on: ubuntu-24.04
     # Der harte Deckel von GitHub liegt bei 6 Stunden. Der Lauf selbst ist
     # auf 5,5 Stunden ausgelegt, dazwischen bleibt Luft fuer Installation
     # und Aufraeumen.
     timeout-minutes: 355
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Ohne diesen Schritt meldet die Laufkette Aenderungen doppelt.
       #
@@ -100,7 +106,7 @@ jobs:
           git reset --quiet --hard "origin/${{ github.ref_name }}"
           echo "Stand: $(git rev-parse --short HEAD)"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip

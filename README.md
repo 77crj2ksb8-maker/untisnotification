@@ -408,7 +408,7 @@ README.md                              diese Datei
 CHANGELOG.md                           was sich wann geändert hat
 .github/workflows/check-timetable.yml  die Laufkette
 .github/workflows/watchdog.yml         meldet, wenn gar nichts mehr läuft
-.github/workflows/tests.yml            Linter und Tests bei jedem Push
+.github/workflows/tests.yml            Linter, Tests und Workflow-Prüfung
 ```
 
 Die drei Workflows sind bewusst drei Dateien. Sie sind keine Kapitel eines
@@ -453,7 +453,7 @@ ruff check .                 # Linter
 pip install actionlint-py && actionlint   # prüft die Workflow-Dateien
 ```
 
-Alles drei läuft bei jedem Push auch in GitHub Actions
+Alles drei läuft bei jedem Push auf `main` und in jedem Pull Request auch in GitHub Actions
 (`.github/workflows/tests.yml`). Die Einstellungen stehen in
 `pyproject.toml`; dort ist auch begründet, welche Linter-Regeln bewusst
 abgewählt sind und warum.

@@ -9,6 +9,20 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
+## 2.9.2 — 2026-10-06
+
+**Nur die Workflows, kein Verhalten.** Alle drei laufen fest auf
+`ubuntu-24.04` statt `ubuntu-latest`: Das Label wandert ab 19.10. auf Ubuntu
+26.04, und bei einem Bot, der rund um die Uhr läuft, soll ein Wechsel des
+Betriebssystems eine bewusste Änderung sein. Ein Test hält Image und
+Python-Version in allen Workflows gleich, damit CI prüft, was im Betrieb
+läuft. `actions/checkout@v5` und `actions/setup-python@v6` laufen nativ auf
+Node 24 — die Deprecation-Warnung in jedem Lauf ist weg. Die Tests laufen nur
+noch für `main` und Pull Requests: Der Arbeitsbranch zeigt immer auf
+denselben Commit, und sein identischer Zwilling-Lauf scheiterte am 05.10. an
+einem Runner-Engpass („not acquired by Runner") — samt Fehler-Mail, obwohl der
+Code auf `main` grün war.
+
 ## 2.9.1 — 2026-10-05
 
 **Aufgeräumt, ohne den Hauptpfad zu ändern.** `webuntis` ist auf `<0.2`

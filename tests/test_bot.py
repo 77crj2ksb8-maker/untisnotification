@@ -154,6 +154,27 @@ def test_workflows_gefunden():
     assert len(WORKFLOWS) >= 2
 
 
+def test_ci_prueft_was_im_betrieb_laeuft():
+    """Gruene Tests auf einem anderen Image oder einer anderen Python-Version
+    als der Bot sagen ueber den Betrieb nichts. Und ein wanderndes Label wie
+    ubuntu-latest tauscht das Betriebssystem aus, ohne dass sich im Repo
+    etwas aendert -- ab 19.10.2026 auf Ubuntu 26.04.
+
+    Mutationstests (je einzeln rot): in einem Workflow "ubuntu-latest"
+    eintragen; in einem die python-version aendern.
+    """
+    images, pythons = set(), set()
+    for datei in WORKFLOWS:
+        for job in workflow(datei.name)["jobs"].values():
+            images.add(job["runs-on"])
+            pythons.update(schritt["with"]["python-version"]
+                           for schritt in job["steps"]
+                           if "setup-python" in schritt.get("uses", ""))
+    assert len(images) == 1, f"verschiedene Images: {images}"
+    assert "latest" not in images.pop()
+    assert len(pythons) == 1, f"verschiedene Python-Versionen: {pythons}"
+
+
 @pytest.mark.parametrize("datei,name,skript",
                          list(run_bloecke()),
                          ids=lambda w: str(w)[:40])

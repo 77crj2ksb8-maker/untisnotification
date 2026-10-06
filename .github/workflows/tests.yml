@@ -1,11 +1,20 @@
 name: Tests
 
-# Laeuft bei jedem Push und jedem Pull Request. Dauert wenige Sekunden --
-# die Testsuite braucht weder Netz noch Zugangsdaten, genau dafuer ist die
-# Trennung zwischen reinen Funktionen und I/O-Schicht da.
+# Laeuft bei jedem Push auf main und in jedem Pull Request. Dauert wenige
+# Sekunden -- die Testsuite braucht weder Netz noch Zugangsdaten, genau
+# dafuer ist die Trennung zwischen reinen Funktionen und I/O-Schicht da.
+#
+# Nur main statt jedes Branches: Der Arbeitsbranch wird immer auf
+# denselben Commit gezogen wie main. Ein Push auf beide startete sonst
+# zwei identische Laeufe -- doppelt so viele Gelegenheiten, an einem
+# Runner-Engpass zu scheitern, und doppelt so viele Mails. Am 05.10.
+# scheiterte genau so der Zwilling eines gruenen Laufs ("The job was
+# not acquired by Runner"), ohne einen einzigen Schritt ausgefuehrt zu
+# haben.
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 # Ein neuer Push macht den Lauf des vorigen ueberfluessig.
@@ -15,13 +24,13 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # warum fest: check-timetable.yml
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
