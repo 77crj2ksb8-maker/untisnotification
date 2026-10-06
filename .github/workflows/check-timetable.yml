@@ -125,10 +125,17 @@ jobs:
           WEBUNTIS_KLASSE: ${{ secrets.WEBUNTIS_KLASSE }}
           # Freiwillig; ohne das Secret bleibt das Lebenszeichen aus.
           UNTISBOT_PING_URL: ${{ secrets.UNTISBOT_PING_URL }}
+          # Freiwillig; ohne das Secret verschluesselt der Bot state.json mit
+          # dem Bot-Token, "aus" speichert im Klartext.
+          UNTISBOT_STATE_KEY: ${{ secrets.UNTISBOT_STATE_KEY }}
           # Fuer watch --kette: die Anmeldung des Nachfolgers.
           GITHUB_TOKEN: ${{ github.token }}
           LOOKAHEAD_DAYS: "7"
           TIMEZONE: "Europe/Berlin"
+          # Abends der Plan fuer morgen, sonntags fuer die Woche. "aus" schaltet
+          # sie ab, "ja" beim zweiten Wert schickt sie nur bei Abweichungen.
+          UNTISBOT_ABENDVORSCHAU: "18:00"
+          UNTISBOT_ABENDVORSCHAU_NUR_AENDERUNGEN: "nein"
         run: |
           case "${{ github.event.inputs.modus }}" in
             selftest)
@@ -155,7 +162,7 @@ jobs:
               # Sturmschutz und Fehlerverhalten: nachfolger_faellig in bot.py.
               #
               # --befehle: In den Pausen zwischen zwei Pruefungen beantwortet
-              # der Bot Telegram-Befehle wie /today. Nur hier, sonst stuenden
+              # der Bot Telegram-Befehle und Knoepfe. Nur hier, sonst stuenden
               # zwei Abholer im Wettstreit um dieselben Nachrichten.
               git config user.name  "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"

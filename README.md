@@ -34,11 +34,20 @@ Montag, 14.09. (heute)
 * **Bremse gegen Fehlalarme** — liefert WebUntis wegen Wartung plötzlich viel
   weniger Stunden, meldet der Bot nicht „alles entfällt", sondern wartet auf
   Bestätigung.
-* **Tagesübersicht auf Zuruf** — `/today` (oder `/heute`) im Chat schickt den
-  heutigen Stundenplan, frisch aus WebUntis: Doppelstunden zusammengefasst,
-  Ausfälle und Änderungen markiert. `/tomorrow` (oder `/morgen`) dasselbe für
-  morgen — und Freitagabend gleich für Montag. Antwortet nur in den
-  eingetragenen Chats.
+* **Stundenplan auf Zuruf** — `/today`, `/tomorrow`, `/week` oder `/day freitag`
+  im Chat schickt den Plan frisch aus WebUntis: Doppelstunden zusammengefasst,
+  Ausfälle und Änderungen markiert. Freitagabend zeigt `/tomorrow` gleich den
+  Montag. Unter jeder Übersicht blättern Knöpfe zum Vortag, Folgetag oder zur
+  Woche; eine feste Tastatur unten im Chat erspart das Tippen. Antwortet nur
+  in den eingetragenen Chats.
+* **Abendvorschau** — an jedem Abend vor einem Schultag um 18 Uhr der Plan für
+  morgen, sonntags die ganze Woche. Auf Wunsch nur, wenn etwas vom Normalen
+  abweicht.
+* **`/status`** — wann der Bot zuletzt bei WebUntis nachgesehen hat, wann als
+  Nächstes, ob der Nachfolger angemeldet ist. Ob der Bot lebt, sieht man so, ohne GitHub zu
+  öffnen.
+* **Verschlüsselter Zustand** — `state.json` liegt im öffentlichen Repo, aber
+  verschlüsselt; siehe [Datenschutz](#datenschutz-statejson-und-das-lauf-log).
 * **Dauerbetrieb rund um die Uhr** — alle 5 Minuten in der Schulzeit, alle 30
   Minuten nachts und am Wochenende. Die Laufkette trägt sich selbst, und steht
   sie doch einmal, wirft der Wachhund sie bei seiner nächsten Runde wieder an.
@@ -112,8 +121,8 @@ Danach, und das ist wichtig:
    eingeschaltet werden.
 
 > Bevor du auf public gehst: Der Bot legt deinen Stundenplan als `state.json`
-> im Repo ab, für jeden lesbar. Fächer, Räume, Zeiten, Kursgruppen — siehe
-> [unten](#achtung-statejson-ist-öffentlich-lesbar).
+> im Repo ab — verschlüsselt, aber mit einer Lücke in der Historie, siehe
+> [Datenschutz](#datenschutz-statejson-und-das-lauf-log).
 
 ### 4. Secrets setzen
 
@@ -129,12 +138,14 @@ Sechs Pflichtwerte:
 | `WEBUNTIS_USERNAME` | `max.mustermann` |
 | `WEBUNTIS_PASSWORD` | dein Passwort |
 
-Optional sind `WEBUNTIS_KLASSE` — siehe [Einstellungen](#einstellungen) — und
+Optional sind `WEBUNTIS_KLASSE` — siehe [Einstellungen](#einstellungen) —,
 `UNTISBOT_PING_URL` für das
-[Lebenszeichen](#drittens-freiwillig-ein-aufpasser-außerhalb-von-github).
+[Lebenszeichen](#drittens-freiwillig-ein-aufpasser-außerhalb-von-github) und
+`UNTISBOT_STATE_KEY`, falls `state.json` mit einem eigenen Schlüssel statt dem
+Bot-Token verschlüsselt werden soll.
 
-`LOOKAHEAD_DAYS` und `TIMEZONE` gehören **nicht** hierher. Der Workflow setzt
-beide direkt als Umgebungsvariable, und die gewinnt immer gegen ein Secret
+`LOOKAHEAD_DAYS`, `TIMEZONE` und die beiden `UNTISBOT_ABENDVORSCHAU`-Werte
+gehören **nicht** hierher. Der Workflow setzt sie direkt als Umgebungsvariable, und die gewinnt immer gegen ein Secret
 gleichen Namens — ein Secret dafür bliebe also wirkungslos. Wer die Werte
 ändern will, ändert sie in `.github/workflows/check-timetable.yml`.
 
@@ -196,7 +207,7 @@ besser sein eigenes Repo ein.
 |---|---|
 | `python bot.py check` | einmal prüfen, melden, Zustand sichern |
 | `python bot.py check --dry-run` | prüfen und die Nachricht ausgeben, ohne zu senden oder zu speichern |
-| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst. `--befehle` beantwortet in den Pausen `/today` und `/tomorrow` |
+| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst. `--befehle` beantwortet in den Pausen Befehle und Knöpfe aus Telegram |
 | `python bot.py selftest` | jeden Zugang einzeln durchtesten und sagen, was klemmt |
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py alert "..."` | Störmeldung senden (`--quelle` für den Link zum Lauf) |
@@ -211,12 +222,20 @@ besser sein eigenes Repo ein.
 |---|---|
 | `/today` oder `/heute` | der heutige Stundenplan: Zeiten, Fächer, Räume, Ausfälle und Änderungen markiert |
 | `/tomorrow` oder `/morgen` | dasselbe für morgen. Steht morgen nichts im Plan (Wochenende, Brückentag), kommt der nächste Schultag der kommenden Woche — mit Hinweis |
-| jeder andere `/`-Befehl | kurze Hilfe |
+| `/week` oder `/woche` | die Woche, jeder Tag zum Aufklappen; Tage mit Ausfall oder Änderung sind schon offen. Am Wochenende die kommende Woche, `/week 12.10.` eine bestimmte |
+| `/day freitag` oder `/tag 14.10.` | ein bestimmter Tag. Wochentage (`mo`, `Freitag`) gelten ab heute, ein Datum ohne Jahr ist das nächstgelegene; auch `übermorgen` |
+| `/status` | ob der Bot lebt: letzte und nächste Abfrage bei WebUntis, Laufzeit, Nachfolger, Abendvorschau, Verschlüsselung |
+| jeder andere `/`-Befehl | kurze Hilfe — und die Tastatur |
 
-Beide Befehle stehen nach dem ersten Lauf auch im Befehlsmenü von Telegram. Der Bot
-antwortet nur in den Chats aus `TELEGRAM_CHAT_ID` — finden und anschreiben kann
-ihn jeder, deinen Stundenplan abfragen nicht. Wie schnell die Antwort kommt,
-steht unter [Wie es läuft](#wie-es-läuft).
+Unter jeder Tages- und Wochenübersicht blättern **Knöpfe** weiter (‹ Vortag ·
+Woche · Folgetag ›); sie ändern die Nachricht, statt den Chat zu füllen. Die
+**Tastatur** mit *Heute · Morgen · Woche · Status* erscheint mit der Antwort
+auf `/start` oder `/status` und bleibt dann stehen.
+
+Alle Befehle stehen nach dem ersten Lauf auch im Befehlsmenü von Telegram. Der
+Bot antwortet nur in den Chats aus `TELEGRAM_CHAT_ID`, Knöpfe eingeschlossen —
+finden und anschreiben kann ihn jeder, deinen Stundenplan abfragen nicht. Wie
+schnell die Antwort kommt, steht unter [Wie es läuft](#wie-es-läuft).
 
 ## Einstellungen
 
@@ -238,6 +257,9 @@ Secrets also nie.
 | `TIMEZONE` | optional | Standard `Europe/Berlin` |
 | `LOG_LEVEL` | optional | Standard `INFO`; `DEBUG` zeigt auch, was die `webuntis`-Bibliothek treibt. `--log` auf der Kommandozeile gewinnt |
 | `UNTISBOT_PING_URL` | optional | Adresse für das [Lebenszeichen](#drittens-freiwillig-ein-aufpasser-außerhalb-von-github), nur `https://`. Ein Tippfehler schaltet nur das Lebenszeichen ab, nie den Bot |
+| `UNTISBOT_ABENDVORSCHAU` | optional | Uhrzeit der Abendvorschau, Standard `18:00`; `aus` schaltet sie ab. Ein Tippfehler schaltet nur die Vorschau ab |
+| `UNTISBOT_ABENDVORSCHAU_NUR_AENDERUNGEN` | optional | `ja`: die Vorschau nur, wenn am nächsten Tag (sonntags: in der Woche) etwas ausfällt oder geändert ist |
+| `UNTISBOT_STATE_KEY` | optional | Schlüssel für `state.json`. Ohne Angabe der Bot-Token, `aus` speichert unverschlüsselt — siehe [Datenschutz](#datenschutz-statejson-und-das-lauf-log) |
 
 `WEBUNTIS_KLASSE` greift **nur**, wenn der persönliche Stundenplan gar nicht
 abrufbar ist. Liefert `my_timetable` Stunden, gewinnt der immer. Wer den
@@ -271,6 +293,9 @@ WEBUNTIS_PASSWORD=
 #TIMEZONE=Europe/Berlin
 #LOG_LEVEL=INFO
 #UNTISBOT_PING_URL=
+#UNTISBOT_ABENDVORSCHAU=18:00
+#UNTISBOT_ABENDVORSCHAU_NUR_AENDERUNGEN=nein
+#UNTISBOT_STATE_KEY=
 ```
 
 ```bash
@@ -333,9 +358,9 @@ vollständige WebUntis-Anmeldung. Verpasst wird dabei nichts — was um 2 Uhr
 nachts eingetragen wird, steht spätestens eine halbe Stunde später im Chat.
 
 Die Pausen zwischen zwei Prüfungen verschläft der Bot nicht: Er hält eine
-Anfrage an Telegram offen (Long-Polling) und beantwortet `/today` oder
-`/tomorrow`, sobald es eintrifft — nach Sekunden. Nur während einer laufenden Prüfung oder einer
-Übergabe zwischen zwei Läufen dauert es einen Moment länger. Steht die Kette,
+Anfrage an Telegram offen (Long-Polling) und beantwortet Befehle und Knöpfe,
+sobald sie eintreffen — nach Sekunden. Nur während einer laufenden Prüfung
+oder einer Übergabe zwischen zwei Läufen dauert es einen Moment länger. Steht die Kette,
 bleibt der Befehl liegen; nach 15 Minuten verfällt er, damit nicht am nächsten
 Morgen die Antwort auf eine Frage vom Vorabend kommt.
 
@@ -345,7 +370,9 @@ wartenden ersetzt wurden.
 
 Sein Gedächtnis ist `state.json` im Repo — der Bot committet sie nach jedem
 Durchlauf selbst. Unveränderte Zustände werden nicht neu geschrieben, sonst
-entstünden hunderte Commits pro Tag.
+entstünden hunderte Commits pro Tag. Dort steht auch, ob die Abendvorschau
+schon raus ist: Übergibt ein Lauf um 18:02 an seinen Nachfolger, schickt der
+sie kein zweites Mal.
 
 ## Wenn etwas schiefgeht
 
@@ -427,33 +454,41 @@ würde sonst eine Meldung auslösen.
 | Es kommt gar nichts | Erst nach dem *ersten* Lauf kann verglichen werden — der merkt sich nur den Stand. Ansonsten: Gibt es gerade überhaupt Änderungen? |
 | Läufe starten nicht | Actions im Repo aktiviert? Nach 60 Tagen ohne Commit schaltet GitHub geplante Workflows ab. |
 
-## Achtung: `state.json` ist öffentlich lesbar
+## Datenschutz: `state.json` und das Lauf-Log
 
-Das Repo muss public sein (siehe [Repo anlegen](#3-repo-anlegen)), und der Bot
-legt seinen Zustand darin ab. Damit steht der Stundenplan im Netz — Fächer,
-Räume, Zeiten, Kursgruppen, für jeden lesbar:
+Das Repo muss public sein (siehe [Repo anlegen](#3-repo-anlegen)), und damit
+ist alles darin für jeden lesbar — auch die Lauf-Logs unter *Actions*.
+
+**`state.json` ist verschlüsselt.** Darin steht der Stundenplan einer Woche:
+Fächer, Räume, Zeiten, Kursgruppen — und in den Kursgruppen auch die
+Lehrerkürzel (`…_3WGI13_1_Ab`), selbst wenn das Feld `teachers` leer bleibt.
+Seit 2.13.0 steht davon nichts mehr lesbar im Repo, nur ein Block mit Schema
+und Zeitstempel davor:
 
 ```json
-{"uid": 842774, "date": "2026-09-15", "start": "07:40", "end": "08:25",
- "subjects": ["D(G2)"], "rooms": ["H1.04"], "group": "D(G2)_3WGI13_..."}
+{"schema": 2, "saved_at": "2026-10-06T18:05:12+02:00",
+ "verschluesselt": "gAAAAABo…"}
 ```
 
-Zwei Dinge, die man dabei leicht übersieht:
+Der Schlüssel ist der Bot-Token: lang, zufällig, ohnehin geheim — wer ihn
+kennt, steuert den Bot sowieso. Ein eigener geht mit dem Secret
+`UNTISBOT_STATE_KEY`, `aus` schaltet die Verschlüsselung ab. Nicht aus dem
+WebUntis-Passwort, mit Absicht: Dann taugte die öffentliche Datei zum Raten
+genau dieses Passworts.
 
-* **Die Lehrerkürzel stehen trotzdem drin.** Das Feld `teachers` bleibt leer,
-  weil die Schule Lehrerdaten nicht an Schülerkonten ausliefert — aber in
-  `group` hängen sie hinten dran (`…_3WGI13_1_Ab`), zusammen mit der Klasse.
-  Wer nur auf `teachers` schaut, hält den Plan für anonymer, als er ist.
-* **Die Historie zählt mit.** Jeder Lauf committet die Datei neu. Sie später
-  zu löschen entfernt sie aus dem aktuellen Stand, nicht aus den alten
-  Commits — dafür bräuchte es einen Eingriff in die Historie und ein
-  force-push.
+Zwei Dinge, die man wissen sollte:
 
-Wer das nicht will, muss den Zustand woanders ablegen (Actions-Cache statt
-Commit) — dann kann er verlorengehen, was ungefährlich ist: Ein Lauf ohne
-gespeicherten Zustand meldet nichts, er merkt sich nur neu. Die Alternative
-ohne diesen Nachteil wäre, `state.json` vor dem Commit zu verschlüsseln; ein
-Secret dafür ist ohnehin schon da.
+* **Die Historie bleibt, wie sie war.** Alle Commits vor 2.13.0 enthalten den
+  Plan im Klartext. Der Bot schreibt die Geschichte eines Repos nicht um;
+  wer das will, braucht einen Eingriff in die Historie und ein force-push.
+* **Ein neuer Bot-Token heißt ein neuer Schlüssel.** Der alte Zustand lässt
+  sich dann nicht mehr öffnen. Das ist harmlos: Der nächste Lauf merkt sich
+  den Plan neu, wie beim allerersten Mal, und meldet dabei nichts.
+
+**Im Lauf-Log stehen keine Chat-IDs und keine Namen.** GitHub schwärzt dort
+nur den exakten Wert eines Secrets — bei `111,222` in `TELEGRAM_CHAT_ID` also
+keine der beiden IDs, den Telegram-Namen ohnehin nicht. Der Bot nennt Chats
+deshalb nur nach ihrer Position („Chat 2 von 2"), auch in `selftest`.
 
 ## Aufbau
 
@@ -563,6 +598,13 @@ vollständig bleibt:
 | `/today` beantwortet nur die eingetragenen Chats | `test_befehle_aus_nur_aus_eingetragenen_chats` |
 | das Postfach verschiebt den Prüftakt nicht | `test_postfach_haelt_die_wartezeit_ein` |
 | ein klemmendes Postfach stört die Überwachung nie | `test_postfach_stoert_die_ueberwachung_nie` |
+| keine Chat-ID und kein Name im öffentlichen Lauf-Log (`selftest`) | `test_selftest_verraet_keine_chats` |
+| keine Chat-ID im Log, wenn ein Versand scheitert | `test_send_log_verraet_keine_chat_id` |
+| verschlüsselt steht in `state.json` nichts vom Stundenplan | `test_save_state_verschluesselt_verraet_nichts` |
+| verschlüsselt wird Unverändertes trotzdem nicht neu geschrieben (Commit-Flut) | `test_save_state_verschluesselt_schreibt_unveraendertes_nicht_neu` |
+| ein neuer Schlüssel legt den Bot nicht lahm und meldet nichts doppelt | `test_check_mit_neuem_schluessel_meldet_nichts_und_laeuft_weiter` |
+| die Abendvorschau kommt nach der Übergabe an den Nachfolger nicht doppelt | `test_abendvorschau_kommt_nach_der_uebergabe_nicht_doppelt` |
+| eine scheiternde Abendvorschau stört die Überwachung nie | `test_abendvorschau_stoert_die_ueberwachung_nie` |
 
 Der `run`-Block-Wächter ist aus Schaden entstanden: In 2.3.0 rutschte beim Einfügen des
 Meldeschritts das schließende `fi` des Überwachungsschritts in den neuen
@@ -585,10 +627,12 @@ wiederholt was ohnehin dasteht, kann weg.
   (*Actions → Stundenplan pruefen → „…" → Disable workflow*). Das respektiert
   der Wachhund. Einen Lauf nur abzubrechen genügt nicht: Sein wartender
   Nachfolger übernimmt sofort, und sonst wirft der Wachhund die Kette wieder an.
-* `/today` und `/tomorrow` brauchen getUpdates — das geht nicht, solange am Bot ein **Webhook**
-  eingetragen ist. Wer den Bot zusätzlich anderswo nutzt, merkt das an einer
-  Warnung „Postfach" im Lauf-Log; die Änderungsmeldungen laufen unberührt
-  weiter.
+* Befehle und Knöpfe brauchen getUpdates — das geht nicht, solange am Bot ein
+  **Webhook** eingetragen ist. Wer den Bot zusätzlich anderswo nutzt, merkt das
+  an einer Warnung „Postfach" im Lauf-Log; die Änderungsmeldungen laufen
+  unberührt weiter.
+* Die zuklappbaren Tage der Wochenübersicht zeigt nur eine halbwegs aktuelle
+  Telegram-App. Ältere zeigen dieselben Zeilen eingerückt, aber offen.
 
 ## Nutzungsrechte
 

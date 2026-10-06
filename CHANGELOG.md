@@ -9,6 +9,28 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
+## 2.13.0 — 2026-10-06
+
+**Woche, Knöpfe, Abendvorschau, `/status`, verschlüsselter Zustand.** `/week`
+zeigt die Woche mit einem zuklappbaren Block je Tag; Tage mit Ausfall oder
+Änderung bleiben offen. `/day freitag` oder `/day 14.10.` zeigt einen
+bestimmten Tag. Unter jeder Übersicht blättern Knöpfe zum Vortag, Folgetag
+oder zur Woche und ändern dabei die Nachricht, statt den Chat zu füllen. Eine
+feste Tastatur (*Heute · Morgen · Woche · Status*) erspart das Tippen. An
+jedem Abend vor einem Schultag kommt um 18 Uhr der Plan für morgen, sonntags
+die Woche; eine Notiz in `state.json` verhindert, dass ein Nachfolger sie
+doppelt schickt. `/status` sagt, wann zuletzt geprüft wurde, wann als Nächstes
+und ob der Nachfolger angemeldet ist.
+
+`state.json` ist jetzt verschlüsselt (Fernet, Schlüssel aus dem Bot-Token,
+auf Wunsch eigener per `UNTISBOT_STATE_KEY`). Verglichen wird der
+entschlüsselte Inhalt, es gibt also nicht mehr Commits als vorher. Ein
+unpassender Schlüssel legt den Bot nicht lahm, er merkt sich den Plan neu,
+ohne zu melden. `selftest` und `send()` nennen Chats nur noch nach ihrer
+Position statt mit ID und Vornamen: Das Lauf-Log ist öffentlich, und GitHub
+schwärzt bei mehreren Chat-IDs keine davon. 41 Mutationsproben auf die neuen
+Teile, alle gefangen.
+
 ## 2.12.0 — 2026-10-06
 
 **`/tomorrow` schickt den Plan für morgen.** Gleiche Darstellung wie `/today`,

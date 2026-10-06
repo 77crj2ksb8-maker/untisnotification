@@ -20,7 +20,7 @@ Aufrufe:
     python bot.py check              einmal pruefen
     python bot.py watch              5,5 Stunden lang im Takt pruefen
     python bot.py watch --kette      ... und den naechsten Lauf anmelden
-    python bot.py watch --befehle    ... und in den Pausen /today, /tomorrow beantworten
+    python bot.py watch --befehle    ... und in den Pausen Telegram-Befehle beantworten
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py alert "..."        Stoermeldung senden
@@ -31,6 +31,7 @@ Aufrufe:
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
 import datetime as dt
 import functools
@@ -63,7 +64,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.12.0"
+VERSION = "2.13.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -79,6 +80,11 @@ NETWORK_TIMEOUT = 30
 #: Format-Version des gespeicherten Zustands. Passt sie nicht, wird der
 #: alte Zustand verworfen statt falsch gedeutet.
 SCHEMA = 2
+
+
+#: So schaltet man eine freiwillige Einstellung ab -- oder an.
+AUS = frozenset({"aus", "off", "nein", "no", "0", "false"})
+AN = frozenset({"an", "on", "ja", "yes", "1", "true"})
 
 
 class ConfigError(RuntimeError):
@@ -101,6 +107,13 @@ class Config:
     timezone: str = "Europe/Berlin"
     #: Adresse fuer das Lebenszeichen (siehe dort). Leer = aus.
     ping_url: str = dataclasses.field(default="", repr=False)
+    #: Schluessel fuer state.json (siehe Zustand). Leer = unverschluesselt.
+    state_key: str = dataclasses.field(default="", repr=False)
+    #: Uhrzeit der Abendvorschau (siehe abendvorschau). None = aus. Der
+    #: Standard aus der Umgebung ist 18:00; hier None, damit ein von Hand
+    #: gebautes Config-Objekt -- etwa in einem Test -- nie von selbst sendet.
+    abendvorschau: dt.time | None = None
+    vorschau_nur_aenderungen: bool = False
 
     @staticmethod
     def from_env(telegram_only: bool = False) -> Config:
@@ -159,6 +172,22 @@ class Config:
                         "Lebenszeichen bleibt aus")
             ping_url = ""
 
+        # Standardmaessig verschluesselt, mit dem Bot-Token als Schluessel:
+        # Der ist lang und zufaellig, liegt ohnehin in den Secrets, und wer
+        # ihn kennt, steuert den Bot sowieso. Ein Schluessel aus dem
+        # WebUntis-Passwort waere bequemer zu merken -- aber dann taugte die
+        # oeffentliche state.json zum Raten genau dieses Passworts.
+        state_key = maybe("UNTISBOT_STATE_KEY")
+        if state_key.lower() in AUS:
+            state_key = ""
+        elif not state_key:
+            state_key = token
+
+        # Wie beim Lebenszeichen: Ein Tippfehler schaltet nur die Vorschau
+        # ab, nie die Ueberwachung.
+        abendvorschau = uhrzeit_aus(maybe("UNTISBOT_ABENDVORSCHAU", "18:00"))
+        nur_aenderungen = maybe("UNTISBOT_ABENDVORSCHAU_NUR_AENDERUNGEN").lower() in AN
+
         return Config(
             telegram_token=token,
             telegram_chats=chats,
@@ -170,7 +199,26 @@ class Config:
             lookahead_days=max(1, min(days, 30)),
             timezone=maybe("TIMEZONE", "Europe/Berlin"),
             ping_url=ping_url,
+            state_key=state_key,
+            abendvorschau=abendvorschau,
+            vorschau_nur_aenderungen=nur_aenderungen,
         )
+
+
+def uhrzeit_aus(text: str) -> dt.time | None:
+    """'18:00', '18.30' oder '18' -> Uhrzeit; 'aus' oder Unlesbares -> None."""
+    wert = text.strip().lower()
+    if not wert or wert in AUS:
+        return None
+    treffer = re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?", wert)
+    try:
+        if treffer:
+            return dt.time(int(treffer.group(1)), int(treffer.group(2) or 0))
+    except ValueError:
+        pass
+    log.warning("UNTISBOT_ABENDVORSCHAU %r ist keine Uhrzeit wie 18:00 -- "
+                "Abendvorschau bleibt aus", text)
+    return None
 
 
 def _load_dotenv(path: Path) -> None:
@@ -1369,7 +1417,6 @@ def tagesuebersicht(lessons: Sequence[Lesson], tag: dt.date,
     und deshalb immer die Uhrzeit, auch wo das Raster eine Nummer kennt:
     Wer morgens nachsieht, will wissen, wann er wo sein muss.
     """
-    periods = periods or {}
     datum = tag.isoformat()
     heute = [lesson for lesson in lessons if lesson.date == datum]
     kopf = f"<b>📅 {esc(day_header(datum))}</b>"
@@ -1378,8 +1425,15 @@ def tagesuebersicht(lessons: Sequence[Lesson], tag: dt.date,
     if not heute:
         return "\n".join(z for z in (kopf, "Keine Stunden im Plan.", fuss) if z)
 
-    zeilen = [kopf, ""]
-    for block in _tagesbloecke(heute, periods):
+    zeilen = [kopf, "", *_tageszeilen(heute, periods or {}), "",
+              f"<i>{_tageszahlen(heute)}</i>" + (f"\n{fuss}" if fuss else "")]
+    return "\n".join(zeilen)
+
+
+def _tageszeilen(stunden: Sequence[Lesson], periods: Periods) -> list[str]:
+    """Eine Zeile je Block (Doppelstunde zusammengefasst), Infotext darunter."""
+    zeilen: list[str] = []
+    for block in _tagesbloecke(stunden, periods):
         erste, letzte = block[0], block[-1]
         # Bloecke entstehen nur aus Stunden mit Rasterplatz; fehlt der
         # Name, ist es eine Einzelstunde quer zum Raster -- dann nur die
@@ -1413,18 +1467,20 @@ def tagesuebersicht(lessons: Sequence[Lesson], tag: dt.date,
         # zweimal untereinander saehe nach einem Fehler aus.
         if erste.note and erste.note != erste.title:
             zeilen.append(f"    <i>{esc(erste.note)}</i>")
+    return zeilen
 
-    ausfall = sum(1 for lesson in heute if lesson.status == CANCELLED)
-    geaendert = sum(1 for lesson in heute if lesson.status == IRREGULAR)
-    zahlen = [f"{len(heute)} Stunde{'' if len(heute) == 1 else 'n'}"]
+
+def _tageszahlen(stunden: Sequence[Lesson]) -> str:
+    """'6 Stunden · 1 entfällt · 2 geändert'"""
+    ausfall = sum(1 for lesson in stunden if lesson.status == CANCELLED)
+    geaendert = sum(1 for lesson in stunden if lesson.status == IRREGULAR)
+    zahlen = [f"{len(stunden)} Stunde{'' if len(stunden) == 1 else 'n'}"]
     if ausfall:
         zahlen.append(f"{ausfall} entfällt" if ausfall == 1
                       else f"{ausfall} entfallen")
     if geaendert:
         zahlen.append(f"{geaendert} geändert")
-    zeilen.append("")
-    zeilen.append(f"<i>{' · '.join(zahlen)}</i>" + (f"\n{fuss}" if fuss else ""))
-    return "\n".join(zeilen)
+    return " · ".join(zahlen)
 
 
 #: So weit schaut /tomorrow voraus, wenn morgen nichts im Plan steht: eine
@@ -1592,6 +1648,275 @@ def strip_html(text: str) -> str:
     return html.unescape(plain)
 
 
+# -- Woche, einzelne Tage, Knoepfe -----------------------------------------
+
+WOCHENTAGE_KURZ = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+
+#: Was nach "/day" stehen darf, ausser Wochentag und Datum.
+RELATIVE_TAGE = {"heute": 0, "morgen": 1, "übermorgen": 2, "uebermorgen": 2}
+
+
+def montag_von(tag: dt.date) -> dt.date:
+    return tag - dt.timedelta(days=tag.weekday())
+
+
+def woche_fuer(heute: dt.date) -> dt.date:
+    """Der Montag der Woche, die /week zeigt. Rein.
+
+    Die laufende -- am Wochenende aber schon die naechste: Samstags will
+    niemand mehr wissen, was am Montag davor war.
+    """
+    return montag_von(heute) + dt.timedelta(days=7 if heute.weekday() >= 5 else 0)
+
+
+def tag_aus(text: str, heute: dt.date) -> dt.date | None:
+    """Liest den Tag aus "/day ...". Rein. None, wenn nichts passt.
+
+    Wochentage gelten ab heute, heute eingeschlossen ("mo", "Montag").
+    Ein Datum ohne Jahr ("14.10.") ist das naechstgelegene: Im Dezember
+    meint "07.01." den kommenden Januar, im Januar "20.12." den vergangenen
+    Dezember. Das ISO-Format kommt von den Knoepfen.
+    """
+    wort = text.strip().lower().rstrip(".")
+    if not wort:
+        return None
+    if wort in RELATIVE_TAGE:
+        return heute + dt.timedelta(days=RELATIVE_TAGE[wort])
+    if len(wort) >= 2:
+        for nummer, name in enumerate(WEEKDAYS):
+            if name.lower().startswith(wort):
+                return heute + dt.timedelta(days=(nummer - heute.weekday()) % 7)
+    try:
+        return dt.date.fromisoformat(wort)
+    except ValueError:
+        pass
+    treffer = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2}|\d{4}))?", wort)
+    if not treffer:
+        return None
+    tag, monat, jahr = treffer.groups()
+    if jahr:
+        try:
+            return dt.date(int(jahr) + (2000 if len(jahr) == 2 else 0),
+                           int(monat), int(tag))
+        except ValueError:
+            return None
+    kandidaten = []
+    for versatz in (-1, 0, 1):
+        try:
+            kandidaten.append(dt.date(heute.year + versatz, int(monat), int(tag)))
+        except ValueError:
+            pass                              # 30.02., 29.02. ausserhalb Schaltjahr
+    return min(kandidaten, key=lambda k: abs(k - heute)) if kandidaten else None
+
+
+def wochenuebersicht(lessons: Sequence[Lesson], montag: dt.date,
+                     periods: Periods | None = None,
+                     stand: dt.datetime | None = None,
+                     limit: int | None = None) -> list[str]:
+    """Die Woche ab montag als Telegram-Nachricht (Befehl /week). Rein.
+
+    Jeder Tag ein zuklappbarer Block -- ausser, er weicht ab: Ausfaelle und
+    Aenderungen sollen ohne Tippen zu sehen sein. Samstag und Sonntag nur,
+    wenn dort etwas steht.
+
+    Eine Liste, weil eine volle Woche ueber die Grenze einer Nachricht
+    kommen kann. split() taugt dafuer nicht: Es schneidet an Zeilen, und
+    ein Zitatblock geht ueber mehrere -- hier wird an Tagesgrenzen geteilt.
+    """
+    periods = periods or {}
+    limit = limit or SPLIT_AT
+    kopf = (f"<b>🗓 Woche vom {montag:%d.%m.} bis "
+            f"{montag + dt.timedelta(days=4):%d.%m.}</b>")
+    fuss = f"<i>Stand {stand:%H:%M} Uhr</i>" if stand else ""
+
+    bloecke: list[str] = []
+    alle: list[Lesson] = []
+    for versatz in range(7):
+        datum = (montag + dt.timedelta(days=versatz)).isoformat()
+        stunden = [lesson for lesson in lessons if lesson.date == datum]
+        name = f"<b>{esc(day_header(datum))}</b>"
+        if not stunden:
+            if versatz < 5:
+                bloecke.append(f"{name} · keine Stunden im Plan")
+            continue
+        alle += stunden
+        status = {lesson.status for lesson in stunden}
+        zeichen = ("❌ " if CANCELLED in status else
+                   "⚠️ " if IRREGULAR in status else "")
+        zitat = "blockquote" if zeichen else "blockquote expandable"
+        zeilen = "\n".join(_tageszeilen(stunden, periods))
+        bloecke.append(f"{zeichen}{name} · {_tageszahlen(stunden)}\n"
+                       f"<{zitat}>{zeilen}</blockquote>")
+
+    if not alle:
+        return ["\n".join(z for z in (kopf, "Keine Stunden im Plan.", fuss) if z)]
+
+    summe = f"<i>Woche: {_tageszahlen(alle)}</i>"
+    bloecke.append(f"{summe}\n{fuss}" if fuss else summe)
+    teile = [kopf]
+    for block in bloecke:
+        if len(teile[-1]) + 1 + len(block) > limit:
+            teile.append(block)
+        else:
+            teile[-1] += "\n" + block
+    return teile
+
+
+def _kurz(tag: dt.date) -> str:
+    return f"{WOCHENTAGE_KURZ[tag.weekday()]} {tag:%d.%m.}"
+
+
+def schultag_daneben(tag: dt.date, schritt: int) -> dt.date:
+    """Der Werktag davor (schritt=-1) oder danach (+1). Rein."""
+    tag += dt.timedelta(days=schritt)
+    while tag.weekday() >= 5:
+        tag += dt.timedelta(days=schritt)
+    return tag
+
+
+def tag_knoepfe(tag: dt.date) -> dict:
+    """Knoepfe unter einer Tagesuebersicht: blaettern, zur Woche. Rein.
+
+    callback_data ist "befehl:datum" -- dieselben Befehle wie getippt, das
+    Postfach braucht so keinen zweiten Weg.
+    """
+    vor, nach = schultag_daneben(tag, -1), schultag_daneben(tag, 1)
+    return {"inline_keyboard": [[
+        {"text": f"‹ {_kurz(vor)}", "callback_data": f"day:{vor}"},
+        {"text": "Woche", "callback_data": f"week:{montag_von(tag)}"},
+        {"text": f"{_kurz(nach)} ›", "callback_data": f"day:{nach}"},
+    ]]}
+
+
+def woche_knoepfe(montag: dt.date) -> dict:
+    vor, nach = montag - dt.timedelta(days=7), montag + dt.timedelta(days=7)
+    return {"inline_keyboard": [[
+        {"text": f"‹ ab {vor:%d.%m.}", "callback_data": f"week:{vor}"},
+        {"text": "Heute", "callback_data": "today:"},
+        {"text": f"ab {nach:%d.%m.} ›", "callback_data": f"week:{nach}"},
+    ]]}
+
+
+#: Die feste Tastatur unten im Chat. Ein Knopf schickt seinen Text als
+#: Nachricht -- befehle_aus() nimmt Befehlsnamen deshalb auch ohne "/".
+TASTATUR = {
+    "keyboard": [[{"text": "Heute"}, {"text": "Morgen"}],
+                 [{"text": "Woche"}, {"text": "Status"}]],
+    "is_persistent": True,
+    "resize_keyboard": True,
+}
+
+
+# -- Abendvorschau ---------------------------------------------------------
+
+def vorschau_faellig(jetzt: dt.datetime, uhrzeit: dt.time | None,
+                     erledigt: str) -> str:
+    """Ist die Abendvorschau dran? -> "tag", "woche" oder "". Rein.
+
+    Sonntags die ganze Woche, sonst der naechste Tag. Ob dort ueberhaupt
+    Schule ist, zeigt erst der Abruf -- Freitag und Samstag gehen deshalb
+    nicht leer aus, sie schicken nur nichts.
+    """
+    if uhrzeit is None or jetzt.time() < uhrzeit:
+        return ""
+    if erledigt == jetzt.date().isoformat():
+        return ""
+    return "woche" if jetzt.weekday() == 6 else "tag"
+
+
+def vorschau_teile(art: str, lessons: Sequence[Lesson], ab: dt.date,
+                   periods: Periods | None = None,
+                   stand: dt.datetime | None = None,
+                   nur_aenderungen: bool = False) -> list[str]:
+    """Die Abendvorschau als Nachricht(en); leer, wenn es nichts zu sagen gibt. Rein.
+
+    Nichts zu sagen heisst: kein Unterricht (Wochenende, Ferien), oder --
+    mit nur_aenderungen -- alles wie immer.
+    """
+    if art == "woche":
+        bis = (ab + dt.timedelta(days=6)).isoformat()
+        stunden = [lesson for lesson in lessons if ab.isoformat() <= lesson.date <= bis]
+    else:
+        stunden = [lesson for lesson in lessons if lesson.date == ab.isoformat()]
+    if not stunden:
+        return []
+    if nur_aenderungen and all(lesson.status == REGULAR for lesson in stunden):
+        return []
+    if art == "woche":
+        return wochenuebersicht(stunden, ab, periods, stand)
+    return ["<i>🌙 Vorschau auf morgen</i>\n"
+            + tagesuebersicht(stunden, ab, periods, stand)]
+
+
+# -- Status ----------------------------------------------------------------
+
+@dataclass
+class Laufbericht:
+    """Was watch() ueber den laufenden Lauf weiss -- fuer /status.
+
+    watch() schreibt, das Postfach liest. Beide laufen im selben Faden (das
+    Postfach IST der Schlaf von watch), Sperren braucht es also nicht.
+    """
+
+    lauf: str = ""                            # GITHUB_RUN_NUMBER, sonst leer
+    beginn: dt.datetime | None = None
+    durchlaeufe: int = 0
+    letzte: dt.datetime | None = None
+    ergebnis: str = ""                        # OK, IDLE, FAILED
+    meldung: str = ""
+    fehlschlaege: int = 0
+    naechste: dt.datetime | None = None
+    nachfolger: bool | None = None            # None: ohne Laufkette
+
+
+def dauer_text(sekunden: float) -> str:
+    minuten = max(0, int(sekunden // 60))
+    if minuten < 60:
+        return f"{minuten} Min."
+    return f"{minuten // 60} Std. {minuten % 60} Min."
+
+
+def statusbericht(bericht: Laufbericht | None, cfg: Config,
+                  jetzt: dt.datetime) -> str:
+    """Antwort auf /status: Lebt der Bot, und wie geht es ihm? Rein."""
+    if bericht is None or bericht.letzte is None:
+        return "<b>🤖 untisbot</b>\nIn diesem Lauf gab es noch keine Abfrage."
+
+    gestoert = bericht.ergebnis == FAILED
+    zeilen = ["<b>⚠️ untisbot hat gerade Probleme</b>" if gestoert
+              else "<b>🤖 untisbot läuft</b>", ""]
+    if gestoert:
+        zustand = f"fehlgeschlagen ({bericht.fehlschlaege}× in Folge)"
+    else:
+        zustand = "in Ordnung"
+    zeilen.append(f"Letzte Abfrage: {bericht.letzte:%H:%M} Uhr · {zustand}")
+    if bericht.meldung:
+        zeilen.append(f"<i>{esc(bericht.meldung[:200])}</i>")
+    if bericht.naechste:
+        zeilen.append(f"Nächste Abfrage: gegen {bericht.naechste:%H:%M} Uhr")
+
+    lauf = f"Lauf #{bericht.lauf}" if bericht.lauf else "Dieser Lauf"
+    seit = (dauer_text((jetzt - bericht.beginn).total_seconds())
+            if bericht.beginn else "?")
+    # "Abfrage", nicht "Pruefung": Wer zur Schule geht, liest dabei Klausur.
+    zeilen.append(f"{esc(lauf)} seit {seit} · {bericht.durchlaeufe} "
+                  f"Abfrage{'' if bericht.durchlaeufe == 1 else 'n'}")
+    if bericht.nachfolger is not None:
+        zeilen.append("Nachfolger: angemeldet" if bericht.nachfolger else
+                      "Nachfolger: noch nicht angemeldet (kommt nach "
+                      f"{NACHFOLGER_MINDESTLAUFZEIT // 60} Minuten)")
+
+    zeilen.append("")
+    if cfg.abendvorschau:
+        zusatz = ", nur bei Änderungen" if cfg.vorschau_nur_aenderungen else ""
+        zeilen.append(f"Abendvorschau: {cfg.abendvorschau:%H:%M} Uhr{zusatz}")
+    else:
+        zeilen.append("Abendvorschau: aus")
+    zeilen.append(f"Zustand: {zustand_art(cfg)}")
+    zeilen.append(f"<i>Version {VERSION}</i>")
+    return "\n".join(zeilen)
+
+
 # ===========================================================================
 #  Telegram  (I/O)
 # ===========================================================================
@@ -1705,22 +2030,25 @@ def _backoff(attempt: int, method: str, why: str,
     time.sleep(wait)
 
 
-def send(cfg: Config, text: str, silent: bool = False) -> int:
+def send(cfg: Config, text: str, silent: bool = False,
+         knoepfe: dict | None = None) -> int:
     """Schickt eine Nachricht an alle konfigurierten Chats.
 
     Nimmt Telegram die HTML-Auszeichnung nicht an, geht dieselbe Nachricht
     als Klartext raus. Eine Meldung darf nie an der Formatierung scheitern.
+    Knoepfe haengen am letzten Teil -- dort, wo man weiterblaettern will.
     """
     chunks = split(text)
     complete = 0
     partial: list[str] = []
     problems: list[TelegramError] = []
 
-    for chat in cfg.telegram_chats:
+    for nummer, chat in enumerate(cfg.telegram_chats, 1):
         done = 0
         try:
             for index, chunk in enumerate(chunks):
-                _send_chunk(cfg, chat, chunk, silent)
+                _send_chunk(cfg, chat, chunk, silent,
+                            knoepfe if index == len(chunks) - 1 else None)
                 done += 1
                 if index:
                     time.sleep(0.4)  # Telegrams Drosselung nicht reizen
@@ -1729,10 +2057,11 @@ def send(cfg: Config, text: str, silent: bool = False) -> int:
             # Pro Empfaenger abfangen: Haengt ein Chat, sollen die anderen
             # ihre Nachricht trotzdem bekommen -- sonst kaeme dieselbe
             # Meldung beim naechsten Durchlauf bei allen anderen erneut an.
+            # Im Log die Position statt der ID, siehe chat_im_log().
             log.warning("Versand an %s fehlgeschlagen (%d/%d Teile): %s",
-                        chat, done, len(chunks), exc)
+                        chat_im_log(nummer), done, len(chunks), exc)
             if done:
-                partial.append(chat)
+                partial.append(chat_im_log(nummer))
             problems.append(exc)
 
     if partial:
@@ -1757,14 +2086,27 @@ def send(cfg: Config, text: str, silent: bool = False) -> int:
     raise next(p for p in problems if not isinstance(p, TelegramConfigError))
 
 
-def _send_chunk(cfg: Config, chat: str, chunk: str, silent: bool) -> None:
-    payload = {
+def chat_im_log(nummer: int) -> str:
+    """So heisst ein Chat im Log: nach seiner Position, nie nach seiner ID.
+
+    Die Lauf-Logs eines oeffentlichen Repos liest jeder. GitHub schwaerzt
+    darin nur den exakten Wert eines Secrets -- steht in TELEGRAM_CHAT_ID
+    "111,222", bleibt jede einzelne ID sichtbar.
+    """
+    return f"Chat {nummer}"
+
+
+def _send_chunk(cfg: Config, chat: str, chunk: str, silent: bool,
+                knoepfe: dict | None = None) -> None:
+    payload: dict[str, Any] = {
         "chat_id": chat,
         "text": chunk,
         "parse_mode": "HTML",
         "disable_notification": silent,
         "link_preview_options": {"is_disabled": True},
     }
+    if knoepfe:
+        payload["reply_markup"] = knoepfe
     try:
         telegram_call(cfg.telegram_token, "sendMessage", payload)
     except TelegramConfigError as exc:
@@ -1791,6 +2133,10 @@ class State:
     #: abgewiesen wurde. Kommt dieselbe Lage noch einmal, ist sie echt --
     #: siehe confirm_or_hold().
     pending: str = ""
+    #: Tag (ISO), an dem die Abendvorschau zuletzt rausging. Steht hier und
+    #: nicht im Speicher des Laufs: Bei der Uebergabe an den Nachfolger kaeme
+    #: sie sonst ein zweites Mal.
+    vorschau: str = ""
 
 
 #: Nach so vielen ungewoehnlichen Durchlaeufen in Folge wird die Lage auch
@@ -1843,14 +2189,99 @@ def fingerprint(lessons: Sequence[Lesson]) -> str:
     return hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
-def load_state(path: Path = STATE_FILE) -> State:
+# -- Verschluesselung ------------------------------------------------------
+#
+# state.json liegt im oeffentlichen Repo: der ganze Stundenplan fuer eine
+# Woche, mit Raeumen und Kursgruppen. Mit Schluessel steht dort nur noch
+# ein unlesbarer Block, dazu Schema und Zeitstempel im Klartext -- die
+# braucht die Diagnose der Testnachricht, und sie verraten nichts.
+#
+# Fernet aus der Bibliothek cryptography (AES mit HMAC): verbreitet,
+# geprueft, und ein falscher Schluessel faellt auf, statt Muell zu
+# entschluesseln. Alte Commits bleiben allerdings lesbar; die Geschichte
+# eines Repos schreibt der Bot nicht um.
+
+class ZustandGesperrt(RuntimeError):
+    """state.json ist verschluesselt und laesst sich nicht oeffnen."""
+
+
+@functools.lru_cache(maxsize=4)
+def _tresor(schluessel: str) -> Any:
+    """Der Fernet-Schluessel zu einem beliebigen Text.
+
+    Ueber scrypt, damit auch ein selbst gewaehlter, kuerzerer
+    UNTISBOT_STATE_KEY nicht in Sekunden zu erraten ist. Zwischengespeichert:
+    scrypt ist absichtlich langsam, und gelesen wird alle paar Minuten.
+    """
+    from cryptography.fernet import Fernet  # nur wer verschluesselt, braucht es
+
+    roh = hashlib.scrypt(schluessel.encode(), salt=b"untisbot/state.json",
+                         n=2 ** 14, r=8, p=1, dklen=32)
+    return Fernet(base64.urlsafe_b64encode(roh))
+
+
+def _zustand_lesen(path: Path, schluessel: str) -> tuple[Any, bool]:
+    """Liest state.json, entschluesselt bei Bedarf. -> (Inhalt, war verschluesselt)
+
+    Wirft OSError oder ValueError bei einer kaputten Datei und
+    ZustandGesperrt, wenn sie sich nicht oeffnen laesst.
+    """
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not (isinstance(raw, dict) and "verschluesselt" in raw):
+        return raw, False
+    if not schluessel:
+        raise ZustandGesperrt("state.json ist verschluesselt, UNTISBOT_STATE_KEY "
+                              "steht aber auf aus")
+    from cryptography.fernet import InvalidToken
+
+    try:
+        inhalt = _tresor(schluessel).decrypt(str(raw["verschluesselt"]).encode())
+    except (InvalidToken, ValueError, TypeError):
+        raise ZustandGesperrt("der Schluessel passt nicht zu state.json -- "
+                              "neuer Bot-Token oder UNTISBOT_STATE_KEY?") from None
+    return json.loads(inhalt), True
+
+
+def _zustand_schreiben(path: Path, payload: dict, schluessel: str) -> None:
+    """Schreibt state.json atomar, mit Schluessel verschluesselt."""
+    if schluessel:
+        inhalt = json.dumps(payload, ensure_ascii=False).encode()
+        payload = {"schema": payload["schema"], "saved_at": payload["saved_at"],
+                   "verschluesselt": _tresor(schluessel).encrypt(inhalt).decode()}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent,
+        prefix=path.name + ".", suffix=".tmp", delete=False,
+    )
+    try:
+        with tmp:
+            json.dump(payload, tmp, ensure_ascii=False, indent=1)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp.name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def load_state(path: Path = STATE_FILE, schluessel: str = "") -> State:
     if not path.exists():
         log.info("Kein gespeicherter Zustand -- das ist der erste Lauf")
         return State(exists=False)
 
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+        raw, _ = _zustand_lesen(path, schluessel)
+    except ZustandGesperrt as exc:
+        # Wie ein Erstlauf: neu merken, nichts melden. Die Datei bleibt
+        # liegen -- der naechste Speichervorgang ersetzt sie ohnehin, und
+        # ihr Inhalt steht weiter in der Geschichte des Repos.
+        log.warning("Zustand nicht lesbar (%s) -- wie Erstlauf", exc)
+        return State(exists=False)
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
         # Kaputte Datei beiseitelegen statt loeschen: sie ist die einzige
         # Spur, falls spaeter etwas nachvollzogen werden muss.
         log.warning("Zustandsdatei unlesbar (%s) -- wird ersetzt", exc)
@@ -1904,7 +2335,7 @@ def load_state(path: Path = STATE_FILE) -> State:
 
     log.info("Zustand geladen: %d Stunden (%s)", len(lessons), raw.get("saved_at", "?"))
     return State(True, tuple(lessons), window, raw.get("saved_at", ""),
-                 str(raw.get("pending") or ""))
+                 str(raw.get("pending") or ""), str(raw.get("vorschau") or ""))
 
 
 def read_saved_at(path: Path = STATE_FILE) -> str:
@@ -1950,14 +2381,19 @@ def describe_age(saved_at: str, now: dt.datetime) -> str:
 
 
 def save_state(lessons: Sequence[Lesson], win: tuple[dt.date, dt.date],
-               path: Path = STATE_FILE, pending: str = "") -> bool:
+               path: Path = STATE_FILE, pending: str = "",
+               vorschau: str | None = None, schluessel: str = "") -> bool:
     """Speichert den Zustand atomar. Gibt True zurueck, wenn geschrieben wurde.
 
     Unveraenderte Zustaende werden NICHT neu geschrieben. Das ist im
     Dauerbetrieb entscheidend: Der Bot prueft alle fuenf Minuten, und jeder
     Schreibvorgang wird auf GitHub zu einem Commit. Ohne diese Sparsamkeit
     waeren das hunderte Commits pro Tag, nur um festzuhalten, dass sich
-    nichts geaendert hat.
+    nichts geaendert hat. Verschluesselt erst recht: Derselbe Inhalt ergibt
+    jedes Mal einen anderen Block, ein Vergleich der Dateien griffe nie.
+
+    vorschau=None behaelt den gespeicherten Wert -- check_once weiss nichts
+    von der Abendvorschau und soll ihre Notiz nicht loeschen.
     """
     window = {"from": f"{win[0]:%Y-%m-%d}", "to": f"{win[1]:%Y-%m-%d}"}
 
@@ -1967,46 +2403,42 @@ def save_state(lessons: Sequence[Lesson], win: tuple[dt.date, dt.date],
     # die Commit-Flut, die dieser Vergleich verhindern soll.
     payload_lessons = json.loads(json.dumps([lesson.to_json() for lesson in lessons]))
 
+    old: Any = None
+    verschluesselt = False
     if path.exists():
         try:
-            old = json.loads(path.read_text(encoding="utf-8"))
-            if (old.get("schema") == SCHEMA
-                    and old.get("window") == window
-                    and old.get("lessons") == payload_lessons
-                    and str(old.get("pending") or "") == pending):
-                log.debug("Zustand unveraendert -- nicht neu geschrieben")
-                return False
-        except (json.JSONDecodeError, OSError):
+            old, verschluesselt = _zustand_lesen(path, schluessel)
+        except (ZustandGesperrt, OSError, ValueError):
             pass
+    if not isinstance(old, dict):
+        old = {}
+    if vorschau is None:
+        vorschau = str(old.get("vorschau") or "")
+
+    # Der Inhalt allein reicht nicht: Liegt die Datei noch im Klartext und
+    # gibt es jetzt einen Schluessel, muss sie neu geschrieben werden --
+    # sonst bliebe der Plan offen, bis er sich zufaellig aendert.
+    if (verschluesselt == bool(schluessel)
+            and old.get("schema") == SCHEMA
+            and old.get("window") == window
+            and old.get("lessons") == payload_lessons
+            and str(old.get("pending") or "") == pending
+            and str(old.get("vorschau") or "") == vorschau):
+        log.debug("Zustand unveraendert -- nicht neu geschrieben")
+        return False
 
     payload = {
         "schema": SCHEMA,
         "saved_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "window": window,
         "pending": pending,
+        "vorschau": vorschau,
         "lessons": payload_lessons,
     }
+    _zustand_schreiben(path, payload, schluessel)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent,
-        prefix=path.name + ".", suffix=".tmp", delete=False,
-    )
-    try:
-        with tmp:
-            json.dump(payload, tmp, ensure_ascii=False, indent=1)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp.name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
-
-    log.info("Zustand gespeichert: %d Stunden (%s bis %s)",
-             len(lessons), *win)
+    log.info("Zustand gespeichert: %d Stunden (%s bis %s)%s",
+             len(lessons), *win, ", verschluesselt" if schluessel else "")
     return True
 
 
@@ -2465,14 +2897,15 @@ def lebenszeichen(url: str) -> bool:
 
 
 # ===========================================================================
-#  Befehle aus Telegram  -- /today, /tomorrow
+#  Befehle aus Telegram  -- /today, /tomorrow, /week, /day, /status
 # ===========================================================================
 #
 # Bis 2.10 sprach der Bot nur, er hoerte nie zu. Jetzt lauscht er in der
 # Wartezeit zwischen zwei Pruefungen auf Befehle: per Long-Polling
 # (getUpdates mit timeout). Eine Antwort kommt so nach Sekunden statt erst
 # beim naechsten 5- oder 30-Minuten-Takt -- und ohne eigenen Server, den
-# ein Webhook braeuchte.
+# ein Webhook braeuchte. Knoepfe kommen auf demselben Weg an, als
+# callback_query statt als Nachricht.
 
 #: So lange haelt Telegram eine getUpdates-Anfrage offen, wenn nichts kommt.
 LANGPOLL = 50
@@ -2489,23 +2922,71 @@ POSTFACH_FEHLERGRENZE = 5
 
 #: Das Befehlsmenue in Telegram (setMyCommands): Befehl -> Beschreibung.
 BEFEHLE = {"today": "Stundenplan von heute",
-           "tomorrow": "Stundenplan von morgen"}
+           "tomorrow": "Stundenplan von morgen",
+           "week": "Die ganze Woche",
+           "day": "Ein bestimmter Tag, z. B. /day freitag",
+           "status": "Läuft der Bot?"}
 
-#: Weitere Schreibweisen fuer denselben Befehl.
-BEFEHL_ALIAS = {"heute": "today", "morgen": "tomorrow"}
+#: Weitere Schreibweisen fuer denselben Befehl -- darunter die Aufschriften
+#: der TASTATUR, die ohne "/" ankommen.
+BEFEHL_ALIAS = {"heute": "today", "morgen": "tomorrow", "woche": "week",
+                "tag": "day"}
 
-HILFE = ("Ich melde Änderungen am Stundenplan von selbst.\n"
-         "/today – Stundenplan von heute\n"
-         "/tomorrow – Stundenplan von morgen")
+#: Nur diese Befehle tragen Knoepfe (tag_knoepfe, woche_knoepfe). Ein
+#: anderer Knopfdruck waere veraltet oder gebastelt -- er wird quittiert,
+#: sonst nichts.
+KNOPF_BEFEHLE = frozenset({"today", "day", "week"})
+
+HILFE = ("Ich melde Änderungen am Stundenplan von selbst. Auf Zuruf:\n"
+         + "\n".join(f"/{befehl} – {text}" for befehl, text in BEFEHLE.items())
+         + "\n\nDie Knöpfe unten machen dasselbe ohne Tippen.")
+
+TAG_HILFE = ("Welcher Tag? Zum Beispiel /day freitag, /day 14.10. "
+             "oder /day übermorgen.")
+
+WEBUNTIS_WEG = ("WebUntis antwortet gerade nicht — versuch es in ein paar "
+                "Minuten noch einmal.")
+
+
+@dataclass(frozen=True)
+class Auftrag:
+    """Ein Befehl aus Telegram -- getippt oder per Knopf."""
+
+    chat: str
+    befehl: str
+    argument: str = ""                        # "/day freitag" -> "freitag"
+    nachricht: int | None = None              # Knopf: seine Nachricht
+    rueckruf: str = ""                        # Knopf: zum Quittieren
 
 
 @dataclass(frozen=True)
 class Abholung:
     """Was eine getUpdates-Antwort fuer den Bot bedeutet."""
 
-    befehle: tuple[tuple[str, str], ...]      # (Chat, Befehl)
+    auftraege: tuple[Auftrag, ...]
     offset: int | None                        # fuer die naechste Abholung
     fremde: tuple[str, ...] = ()              # Chats, die nicht eingetragen sind
+
+    @property
+    def befehle(self) -> tuple[tuple[str, str], ...]:
+        """(Chat, Befehl) je Auftrag -- die Kurzform."""
+        return tuple((auftrag.chat, auftrag.befehl) for auftrag in self.auftraege)
+
+
+def befehl_aus_text(text: str) -> tuple[str, str] | None:
+    """'/day@MeinBot freitag' -> ('day', 'freitag'). Rein.
+
+    Ohne "/" zaehlt nur eine Nachricht, die genau ein Befehl ist ("Woche"):
+    So kommen die Knoepfe der TASTATUR an. Alles andere ist Plaudern -> None.
+    """
+    if text.startswith("/"):
+        worte = text[1:].split(maxsplit=1)
+        befehl = worte[0].split("@")[0].lower() if worte else ""
+        argument = worte[1].strip() if len(worte) > 1 else ""
+        return BEFEHL_ALIAS.get(befehl, befehl), argument
+    wort = text.strip().lower()
+    befehl = BEFEHL_ALIAS.get(wort, wort)
+    return (befehl, "") if befehl in BEFEHLE else None
 
 
 def befehle_aus(updates: Sequence[Any], chats: Iterable[str],
@@ -2517,12 +2998,13 @@ def befehle_aus(updates: Sequence[Any], chats: Iterable[str],
 
     Beantwortet wird nur, was aus einem der eingetragenen Chats kommt: Den
     Bot kann jeder Telegram-Nutzer finden und anschreiben, den Stundenplan
-    soll er trotzdem nicht abfragen koennen. Und nur Frisches, siehe
-    BEFEHL_MAX_ALTER. Je Chat jeder Befehl hoechstens einmal pro Abholung:
-    Zweimal getippt heisst nicht zweimal gewollt.
+    soll er trotzdem nicht abfragen koennen. Das gilt auch fuer Knoepfe.
+    Getippte Befehle nur frisch, siehe BEFEHL_MAX_ALTER, und je Chat jeder
+    hoechstens einmal pro Abholung: Zweimal getippt heisst nicht zweimal
+    gewollt.
     """
     erlaubt = {str(chat) for chat in chats}
-    befehle: list[tuple[str, str]] = []
+    auftraege: list[Auftrag] = []
     fremde: list[str] = []
     offset: int | None = None
     for update in updates:
@@ -2530,15 +3012,31 @@ def befehle_aus(updates: Sequence[Any], chats: Iterable[str],
             offset = max(offset or 0, int(update["update_id"]) + 1)
         except (KeyError, TypeError, ValueError):
             continue
-        nachricht = update.get("message")
-        if not isinstance(nachricht, dict):
+        rueckruf = update.get("callback_query")
+        if isinstance(rueckruf, dict):
+            # "day:2026-10-14" liest sich wie "/day 2026-10-14".
+            nachricht = rueckruf.get("message")
+            text = "/" + str(rueckruf.get("data") or "").replace(":", " ", 1)
+        else:
+            rueckruf = None
+            nachricht = update.get("message")
+            text = nachricht.get("text") if isinstance(nachricht, dict) else None
+        if not isinstance(nachricht, dict) or not isinstance(text, str):
             continue                          # bearbeitet, Kanal, Beitritt ...
-        text = nachricht.get("text")
-        if not isinstance(text, str) or not text.startswith("/"):
+        gelesen = befehl_aus_text(text)
+        if gelesen is None:
             continue                          # Plaudern ist kein Befehl
         chat = str((nachricht.get("chat") or {}).get("id", ""))
         if chat not in erlaubt:
             fremde.append(chat)
+            continue
+        befehl, argument = gelesen
+        if rueckruf is not None:
+            # Ohne Altersgrenze: Gedrueckt ist gedrueckt. Das Datum der
+            # Nachricht sagt nur, wann der Knopf entstand.
+            auftraege.append(Auftrag(chat, befehl, argument,
+                                     nachricht.get("message_id"),
+                                     str(rueckruf.get("id") or "")))
             continue
         try:
             alter = jetzt - float(nachricht.get("date"))
@@ -2546,43 +3044,56 @@ def befehle_aus(updates: Sequence[Any], chats: Iterable[str],
             continue
         if alter > BEFEHL_MAX_ALTER:
             continue
-        # "/today@MeinBot bitte" -> "today"
-        worte = text[1:].split()
-        befehl = worte[0].split("@")[0].lower() if worte else ""
-        befehl = BEFEHL_ALIAS.get(befehl, befehl)
-        if (chat, befehl) not in befehle:
-            befehle.append((chat, befehl))
-    return Abholung(tuple(befehle), offset, tuple(fremde))
+        auftrag = Auftrag(chat, befehl, argument)
+        if auftrag not in auftraege:
+            auftraege.append(auftrag)
+    return Abholung(tuple(auftraege), offset, tuple(fremde))
 
 
-def tagesuebersicht_holen(cfg: Config, morgen: bool = False) -> str:
-    """Der Plan von heute oder morgen, frisch aus WebUntis -- nicht aus
-    state.json.
+def plan_holen(cfg: Config, von: dt.date,
+               bis: dt.date) -> tuple[list[Lesson], Periods]:
+    """Der Plan, frisch aus WebUntis -- nicht aus state.json. Wirft UntisError.
 
     Der gespeicherte Zustand ist bis zu einen Takt alt und bleibt bei einer
     gemerkten Ausnahmelage absichtlich stehen. Auf eine Frage gehoert der
     Plan, wie er jetzt ist.
+    """
+    with Untis(cfg) as untis:
+        try:
+            lessons = untis.timetable(von, bis)
+        except NothingToDo:
+            lessons = []                  # Wochenende, Ferien
+        periods = untis.timegrid()
+    return lessons, periods
+
+
+def tagesantwort(cfg: Config, tag: dt.date, jetzt: dt.datetime,
+                 morgen: bool = False) -> tuple[list[str], dict | None]:
+    """Die Tagesuebersicht samt Knoepfen -- oder der Hinweis, dass WebUntis fehlt.
 
     Fuer morgen gleich eine ganze Woche: Ist morgen frei, steht der naechste
     Schultag schon in derselben Antwort -- ein Abruf statt bis zu sieben.
     """
-    jetzt = now_local(cfg.timezone)
-    tag = jetzt.date() + dt.timedelta(days=1 if morgen else 0)
     bis = tag + dt.timedelta(days=SCHULTAG_SUCHE - 1 if morgen else 0)
     try:
-        with Untis(cfg) as untis:
-            try:
-                lessons = untis.timetable(tag, bis)
-            except NothingToDo:
-                lessons = []              # Wochenende, Ferien
-            periods = untis.timegrid()
+        lessons, periods = plan_holen(cfg, tag, bis)
     except UntisError as exc:
         log.warning("Tagesuebersicht nicht abrufbar: %s", exc)
-        return ("WebUntis antwortet gerade nicht — versuch es in ein paar "
-                "Minuten noch einmal.")
+        return [WEBUNTIS_WEG], None
     if morgen:
-        return morgenuebersicht(lessons, tag, periods, jetzt)
-    return tagesuebersicht(lessons, tag, periods, jetzt)
+        gezeigt = naechster_schultag(lessons, tag)
+        return [morgenuebersicht(lessons, tag, periods, jetzt)], tag_knoepfe(gezeigt)
+    return [tagesuebersicht(lessons, tag, periods, jetzt)], tag_knoepfe(tag)
+
+
+def wochenantwort(cfg: Config, montag: dt.date,
+                  jetzt: dt.datetime) -> tuple[list[str], dict | None]:
+    try:
+        lessons, periods = plan_holen(cfg, montag, montag + dt.timedelta(days=6))
+    except UntisError as exc:
+        log.warning("Wochenuebersicht nicht abrufbar: %s", exc)
+        return [WEBUNTIS_WEG], None
+    return wochenuebersicht(lessons, montag, periods, jetzt), woche_knoepfe(montag)
 
 
 class Postfach:
@@ -2600,9 +3111,11 @@ class Postfach:
     def __init__(self, cfg: Config,
                  uhr: Callable[[], float] = time.monotonic,
                  wanduhr: Callable[[], float] = time.time,
-                 schlaf: Callable[[float], None] = time.sleep) -> None:
+                 schlaf: Callable[[float], None] = time.sleep,
+                 bericht: Laufbericht | None = None) -> None:
         self.cfg = cfg
         self.uhr, self.wanduhr, self.schlaf = uhr, wanduhr, schlaf
+        self.bericht = bericht
         self.offset: int | None = None
         self.fehler = 0
         self.aktiv = True
@@ -2638,7 +3151,7 @@ class Postfach:
             self._menue_setzen()
         warte = min(int(rest), LANGPOLL)
         payload: dict[str, Any] = {"timeout": warte,
-                                   "allowed_updates": ["message"]}
+                                   "allowed_updates": ["message", "callback_query"]}
         if self.offset is not None:
             payload["offset"] = self.offset
         updates = telegram_call(self.cfg.telegram_token, "getUpdates", payload,
@@ -2652,29 +3165,89 @@ class Postfach:
         if abholung.fremde:
             log.info("%d Befehl(e) aus nicht eingetragenen Chats ignoriert",
                      len(abholung.fremde))
-        for chat, befehl in abholung.befehle:
-            self._antworten(chat, befehl)
-        if abholung.befehle:
+        for auftrag in abholung.auftraege:
+            self._antworten(auftrag)
+        if abholung.auftraege:
             # Sofort quittieren: Endet der Lauf vor der naechsten Abholung,
             # bekaeme der Nachfolger dieselben Befehle noch einmal.
             telegram_call(self.cfg.telegram_token, "getUpdates",
                           {"offset": self.offset, "timeout": 0}, attempts=1)
 
-    def _antworten(self, chat: str, befehl: str) -> None:
+    def _antworten(self, auftrag: Auftrag) -> None:
+        befehl = auftrag.befehl[:20]
         try:
-            if befehl == "today":
-                text = tagesuebersicht_holen(self.cfg)
-            elif befehl == "tomorrow":
-                text = tagesuebersicht_holen(self.cfg, morgen=True)
-            else:
-                text = HILFE
-            for teil in split(text):
-                _send_chunk(self.cfg, chat, teil, silent=False)
+            if auftrag.rueckruf:
+                self._knopf_quittieren(auftrag.rueckruf)
+                if auftrag.befehl not in KNOPF_BEFEHLE:
+                    return
+            teile, knoepfe = self._antwort(auftrag)
+            self._zeigen(auftrag, teile, knoepfe)
         except Exception as exc:
             log.warning("Antwort auf /%s fehlgeschlagen: %s", befehl,
                         str(exc).splitlines()[0])
             return
         log.info("Befehl /%s beantwortet", befehl)
+
+    def _antwort(self, auftrag: Auftrag) -> tuple[list[str], dict | None]:
+        jetzt = now_local(self.cfg.timezone)
+        heute = jetzt.date()
+        befehl = auftrag.befehl
+        if befehl == "today":
+            return tagesantwort(self.cfg, heute, jetzt)
+        if befehl == "tomorrow":
+            return tagesantwort(self.cfg, heute + dt.timedelta(days=1), jetzt,
+                                morgen=True)
+        if befehl == "day":
+            tag = tag_aus(auftrag.argument, heute)
+            return tagesantwort(self.cfg, tag, jetzt) if tag else ([TAG_HILFE], None)
+        if befehl == "week":
+            tag = tag_aus(auftrag.argument, heute)
+            montag = montag_von(tag) if tag else woche_fuer(heute)
+            return wochenantwort(self.cfg, montag, jetzt)
+        if befehl == "status":
+            return [statusbericht(self.bericht, self.cfg, jetzt)], TASTATUR
+        return [HILFE], TASTATUR
+
+    def _zeigen(self, auftrag: Auftrag, teile: Sequence[str],
+                knoepfe: dict | None) -> None:
+        """Ein Knopf bearbeitet seine Nachricht, statt eine neue zu schicken:
+        Beim Blaettern liefe der Chat sonst voll."""
+        if (auftrag.nachricht is not None and len(teile) == 1
+                and self._bearbeiten(auftrag, teile[0], knoepfe)):
+            return
+        stuecke = [stueck for teil in teile for stueck in split(teil)]
+        for nummer, stueck in enumerate(stuecke, 1):
+            _send_chunk(self.cfg, auftrag.chat, stueck, silent=False,
+                        knoepfe=knoepfe if nummer == len(stuecke) else None)
+
+    def _bearbeiten(self, auftrag: Auftrag, text: str, knoepfe: dict | None) -> bool:
+        payload: dict[str, Any] = {
+            "chat_id": auftrag.chat, "message_id": auftrag.nachricht,
+            "text": text, "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+        }
+        if knoepfe:
+            payload["reply_markup"] = knoepfe
+        try:
+            telegram_call(self.cfg.telegram_token, "editMessageText", payload,
+                          attempts=1)
+        except TelegramError as exc:
+            # Zweimal derselbe Knopf: Es steht schon da, was kommen soll.
+            if "not modified" in str(exc):
+                return True
+            log.info("Nachricht nicht bearbeitbar (%s) -- schicke sie neu",
+                     str(exc).splitlines()[0])
+            return False
+        return True
+
+    def _knopf_quittieren(self, rueckruf: str) -> None:
+        """Stoppt die Sanduhr am Knopf. Scheitert das, dreht sie ein paar
+        Sekunden weiter -- kein Grund, die Antwort ausfallen zu lassen."""
+        try:
+            telegram_call(self.cfg.telegram_token, "answerCallbackQuery",
+                          {"callback_query_id": rueckruf}, attempts=1)
+        except TelegramError as exc:
+            log.info("Knopf nicht quittiert: %s", str(exc).splitlines()[0])
 
     def _menue_setzen(self) -> None:
         """Traegt die Befehle ins Telegram-Menue ein -- einmal je Lauf."""
@@ -2761,7 +3334,8 @@ def check_once(cfg: Config, dry_run: bool = False,
     except UntisError as exc:
         return Result(FAILED, message=str(exc))
 
-    previous = load_state(state_path)
+    schluessel = cfg.state_key
+    previous = load_state(state_path, schluessel)
     compare_win = overlap(win, previous.window)
 
     # -- Sonderfall: keine Ueberlappung (sehr lange Pause)
@@ -2769,7 +3343,7 @@ def check_once(cfg: Config, dry_run: bool = False,
     # gespeicherten Stunden als verschwunden.
     if previous.exists and compare_win is None:
         if not dry_run:
-            save_state(lessons, win, state_path)
+            save_state(lessons, win, state_path, schluessel=schluessel)
             commit_state(state_path)
         return Result(OK, message="Fenster komplett verschoben -- neu grundiert")
 
@@ -2784,7 +3358,7 @@ def check_once(cfg: Config, dry_run: bool = False,
         if not bestaetigt:
             if not dry_run:
                 save_state(previous.lessons, previous.window or win,
-                           state_path, pending=pending_neu)
+                           state_path, pending=pending_neu, schluessel=schluessel)
                 commit_state(state_path)
             return Result(IDLE, message=f"Ungewoehnliche Lage gemerkt "
                                         f"({sichtung}), warte auf "
@@ -2800,7 +3374,7 @@ def check_once(cfg: Config, dry_run: bool = False,
     # -- Erstlauf: nur merken, nicht fluten
     if not previous.exists:
         if not dry_run:
-            save_state(lessons, win, state_path)
+            save_state(lessons, win, state_path, schluessel=schluessel)
             commit_state(state_path)
         return Result(OK, message=f"Erster Lauf: {len(lessons)} Stunden gemerkt, "
                                   "nichts gesendet")
@@ -2809,7 +3383,7 @@ def check_once(cfg: Config, dry_run: bool = False,
     changes = diff(previous.lessons, lessons, compare_win)
     if not changes:
         if not dry_run:
-            save_state(lessons, win, state_path)
+            save_state(lessons, win, state_path, schluessel=schluessel)
             commit_state(state_path)
         return Result(OK, message=f"Keine Aenderungen ({len(lessons)} Stunden)")
 
@@ -2827,17 +3401,68 @@ def check_once(cfg: Config, dry_run: bool = False,
     except TelegramError as exc:
         return Result(FAILED, message=f"Versand fehlgeschlagen: {exc}")
 
-    save_state(lessons, win, state_path)
+    save_state(lessons, win, state_path, schluessel=schluessel)
     commit_state(state_path)
     return Result(OK, changes=len(changes),
                   message=f"{len(changes)} Aenderung(en) gemeldet")
+
+
+def abendvorschau(cfg: Config, erledigt: str = "",
+                  state_path: Path = STATE_FILE) -> str:
+    """Schickt abends den Plan fuer morgen, sonntags den fuer die Woche.
+
+    Gibt den Tag zurueck, fuer den die Vorschau erledigt ist. watch()
+    merkt ihn sich zusaetzlich zur Notiz in state.json: Liesse sich die
+    nicht speichern, kaeme die Vorschau sonst alle fuenf Minuten. Die Notiz
+    selbst verhindert sie doppelt nach der Uebergabe an den Nachfolger.
+
+    Erledigt ist sie auch, wenn es nichts zu sagen gab (Wochenende, Ferien,
+    oder nur_aenderungen und alles wie immer) -- sonst fragte der Bot den
+    ganzen Abend WebUntis, nur um wieder nichts zu schicken.
+
+    Wirft nie: Eine Vorschau ist Nebensache neben der Ueberwachung. Klappt
+    es nicht, versucht es der naechste Durchlauf.
+    """
+    if cfg.abendvorschau is None:
+        return erledigt
+    try:
+        jetzt = now_local(cfg.timezone)
+        art = vorschau_faellig(jetzt, cfg.abendvorschau, erledigt)
+        if not art:
+            return erledigt
+        heute = jetzt.date().isoformat()
+        if load_state(state_path, cfg.state_key).vorschau == heute:
+            return heute                     # der Vorgaenger war schneller
+
+        morgen = jetzt.date() + dt.timedelta(days=1)
+        bis = morgen + dt.timedelta(days=6 if art == "woche" else 0)
+        lessons, periods = plan_holen(cfg, morgen, bis)
+        teile = vorschau_teile(art, lessons, morgen, periods, jetzt,
+                               cfg.vorschau_nur_aenderungen)
+        knoepfe = woche_knoepfe(morgen) if art == "woche" else tag_knoepfe(morgen)
+        for nummer, teil in enumerate(teile, 1):
+            send(cfg, teil, knoepfe=knoepfe if nummer == len(teile) else None)
+        if teile:
+            log.info("Abendvorschau verschickt (%s)", art)
+
+        zustand = load_state(state_path, cfg.state_key)
+        if zustand.exists and zustand.window and save_state(
+                zustand.lessons, zustand.window, state_path, zustand.pending,
+                vorschau=heute, schluessel=cfg.state_key):
+            commit_state(state_path)
+        return heute
+    except Exception as exc:
+        log.warning("Abendvorschau nicht verschickt (%s) -- der naechste "
+                    "Durchlauf versucht es erneut", str(exc).splitlines()[0])
+        return erledigt
 
 
 def watch(cfg: Config, minutes: int, interval: int,
           night_interval: int | None = None,
           sleeper: Callable[[float], None] = time.sleep,
           clock: Callable[[], float] = time.monotonic,
-          anmelden: Callable[[], str] | None = None) -> int:
+          anmelden: Callable[[], str] | None = None,
+          bericht: Laufbericht | None = None) -> int:
     """Prueft ueber einen laengeren Zeitraum in festem Takt.
 
     Der Grund fuer diese Schleife: GitHubs Zeitplaner haelt kurze
@@ -2856,7 +3481,8 @@ def watch(cfg: Config, minutes: int, interval: int,
 
     Mit anmelden meldet der Lauf unterwegs einmal seinen Nachfolger an
     (nachfolger_faellig, nachfolger_anmelden). Nach jedem gelungenen
-    Durchlauf geht ein Lebenszeichen raus, falls eingerichtet.
+    Durchlauf geht ein Lebenszeichen raus, falls eingerichtet, und abends
+    die Abendvorschau. In bericht steht fuer /status, wie es dem Lauf geht.
 
     Rueckgabewert ist der Exit-Code: 0 = in Ordnung, 1 = Eingriff noetig.
     """
@@ -2865,6 +3491,9 @@ def watch(cfg: Config, minutes: int, interval: int,
     run = 0
     consecutive_failures = 0
     angemeldet = anmelden is None        # ohne Kette nichts anzumelden
+    vorschau_erledigt = ""
+    if bericht is not None:
+        bericht.beginn = now_local(cfg.timezone)
 
     while True:
         run += 1
@@ -2888,6 +3517,9 @@ def watch(cfg: Config, minutes: int, interval: int,
         # Arbeit ohne Meldung, kein Ausfall.
         if result.status != FAILED:
             lebenszeichen(cfg.ping_url)
+            # Nach einem Fehlschlag nicht: Dann klemmt WebUntis, und die
+            # Vorschau scheiterte am selben Abruf.
+            vorschau_erledigt = abendvorschau(cfg, vorschau_erledigt)
 
         if result.status == FAILED:
             consecutive_failures += 1
@@ -2921,7 +3553,17 @@ def watch(cfg: Config, minutes: int, interval: int,
         if remaining < takt:
             break
         # Die eigene Laufzeit abziehen, damit der Takt nicht wegdriftet.
-        sleeper(max(0.0, takt - (clock() - started)))
+        pause = max(0.0, takt - (clock() - started))
+        if bericht is not None:
+            jetzt = now_local(cfg.timezone)
+            bericht.durchlaeufe = run
+            bericht.letzte = jetzt
+            bericht.ergebnis = result.status
+            bericht.meldung = first_line
+            bericht.fehlschlaege = consecutive_failures
+            bericht.nachfolger = None if anmelden is None else angemeldet
+            bericht.naechste = jetzt + dt.timedelta(seconds=pause)
+        sleeper(pause)
 
     print(f"Fertig: {run} Durchlaeufe.")
     return 0
@@ -2931,7 +3573,16 @@ def watch(cfg: Config, minutes: int, interval: int,
 #  Diagnose
 # ===========================================================================
 
-def selftest(cfg: Config) -> int:
+def zustand_art(cfg: Config) -> str:
+    """Wie state.json gespeichert wird, in Worten -- fuer selftest und /status."""
+    if not cfg.state_key:
+        return "unverschlüsselt (UNTISBOT_STATE_KEY=aus)"
+    if cfg.state_key == cfg.telegram_token:
+        return "verschlüsselt (Schlüssel aus dem Bot-Token)"
+    return "verschlüsselt (Schlüssel aus UNTISBOT_STATE_KEY)"
+
+
+def selftest(cfg: Config, state_path: Path = STATE_FILE) -> int:
     """Prueft jeden Zugang einzeln und sagt genau, was klemmt."""
     ok = True
     print("=" * 58)
@@ -2944,12 +3595,15 @@ def selftest(cfg: Config) -> int:
         print(f"  [NEIN] {exc}")
         ok = False
 
-    for chat in cfg.telegram_chats:
-        print(f"Chat {chat}")
+    # Weder ID noch Name, siehe chat_im_log(): Den Vornamen schwaerzt GitHub
+    # nie. Zum Zuordnen reichen Position und Art des Chats.
+    for nummer, chat in enumerate(cfg.telegram_chats, 1):
+        print(f"{chat_im_log(nummer)} von {len(cfg.telegram_chats)}")
         try:
             info = telegram_call(cfg.telegram_token, "getChat", {"chat_id": chat})
-            name = info.get("title") or info.get("first_name") or "?"
-            print(f"  [ja  ] erreichbar: {name}")
+            art = {"private": "privat", "group": "Gruppe", "supergroup": "Gruppe",
+                   "channel": "Kanal"}.get(info.get("type"), "?")
+            print(f"  [ja  ] erreichbar ({art})")
         except Exception as exc:
             print(f"  [NEIN] {str(exc).splitlines()[0]}")
             ok = False
@@ -2980,6 +3634,27 @@ def selftest(cfg: Config) -> int:
     except Exception as exc:
         print(f"  [NEIN] {str(exc).splitlines()[0]}")
         ok = False
+
+    # Nur lesen: selftest schreibt nichts (siehe Workflow). Ein Schluessel,
+    # der nicht passt, ist kein Fehler -- der naechste Lauf merkt sich den
+    # Plan einfach neu, wie beim allerersten Mal und ohne Meldungen.
+    print(f"Zustand          {zustand_art(cfg)}")
+    if not state_path.exists():
+        print("  [info] noch keine state.json -- entsteht beim ersten Lauf")
+    else:
+        try:
+            _, verschluesselt = _zustand_lesen(state_path, cfg.state_key)
+        except ZustandGesperrt as exc:
+            print(f"  [info] {exc}\n         Der naechste Lauf merkt sich den "
+                  "Plan neu, ohne Meldungen.")
+        except (OSError, ValueError):
+            print("  [info] state.json unlesbar -- der naechste Lauf ersetzt sie")
+        else:
+            if cfg.state_key and not verschluesselt:
+                print("  [info] state.json liegt noch im Klartext -- wird beim "
+                      "naechsten Speichern verschluesselt")
+            else:
+                print("  [ja  ] state.json laesst sich oeffnen")
 
     # Nur pruefen, wenn eingerichtet: Es ist freiwillig, sein Fehlen kein
     # Fehler. Eingerichtet aber kaputt waere dagegen ein stiller Ausfall
@@ -3308,10 +3983,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Postfach nur auf Wunsch: Zwei gleichzeitige getUpdates-Abholungen
         # verdraengen einander (HTTP 409). Ein lokaler watch neben der
         # laufenden Kette soll ihr die Befehle nicht wegschnappen.
-        postfach = Postfach(cfg) if args.befehle else None
+        # Die Laufnummer nur fuer /status: "Lauf #102" findet man im
+        # Actions-Tab wieder.
+        bericht = Laufbericht(lauf=os.environ.get("GITHUB_RUN_NUMBER", ""))
+        postfach = Postfach(cfg, bericht=bericht) if args.befehle else None
         return watch(cfg, args.minutes, args.interval, args.night_interval,
                      sleeper=postfach.warten if postfach else time.sleep,
-                     anmelden=kette_aus_umgebung() if args.kette else None)
+                     anmelden=kette_aus_umgebung() if args.kette else None,
+                     bericht=bericht)
 
     result = check_once(cfg, dry_run=args.dry_run)
     print(result.message or result.status)

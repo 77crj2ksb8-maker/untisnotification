@@ -30,6 +30,7 @@ import collections
 import dataclasses
 import datetime as dt
 import json
+import logging
 import os
 import re
 import subprocess
@@ -364,7 +365,8 @@ BASIS_ENV = {
 def env(monkeypatch):
     """Saubere Umgebung: alle bekannten Variablen erst weg, dann die Basis."""
     for name in [*BASIS_ENV, "WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE",
-                 "UNTISBOT_PING_URL"]:
+                 "UNTISBOT_PING_URL", "UNTISBOT_STATE_KEY",
+                 "UNTISBOT_ABENDVORSCHAU", "UNTISBOT_ABENDVORSCHAU_NUR_AENDERUNGEN"]:
         monkeypatch.delenv(name, raising=False)
     for name, value in BASIS_ENV.items():
         monkeypatch.setenv(name, value)
@@ -407,10 +409,28 @@ def test_config_darstellung_verraet_keine_geheimnisse(cfg):
     Mutationstest: bei untis_password "repr=False" streichen -> dieser
     Test muss rot werden.
     """
-    text = repr(dataclasses.replace(cfg, ping_url=PING))
-    for geheim in (cfg.telegram_token, cfg.untis_password, cfg.untis_user, PING):
+    text = repr(dataclasses.replace(cfg, ping_url=PING, state_key="eigener-schluessel"))
+    for geheim in (cfg.telegram_token, cfg.untis_password, cfg.untis_user, PING,
+                   "eigener-schluessel"):
         assert geheim not in text
     assert "ks-hausach" in text                  # der Rest bleibt lesbar
+
+
+def test_config_verschluesselt_standardmaessig_mit_dem_bot_token(env):
+    """Ohne eigenes Secret: Der Token ist lang, zufaellig und ohnehin
+    geheim -- anders als ein WebUntis-Passwort, das sich an einer
+    oeffentlichen state.json erraten liesse."""
+    cfg = Config.from_env()
+    assert cfg.state_key == BASIS_ENV["TELEGRAM_BOT_TOKEN"]
+    assert cfg.state_key != cfg.untis_password
+
+
+@pytest.mark.parametrize("wert,erwartet", [
+    ("eigener-langer-schluessel", "eigener-langer-schluessel"),
+    ("aus", ""), ("AUS", ""), ("nein", ""), ("off", "")])
+def test_config_eigener_oder_kein_schluessel(env, wert, erwartet):
+    env.setenv("UNTISBOT_STATE_KEY", wert)
+    assert Config.from_env().state_key == erwartet
 
 
 def test_config_fehlendes_pflichtfeld(env):
@@ -2301,6 +2321,29 @@ def test_send_teilzustellung_gilt_als_erfolg(cfg, monkeypatch):
     assert len(aufrufe) == 2   # nach dem Fehlschlag wird nicht weitergesendet
 
 
+def test_send_log_verraet_keine_chat_id(cfg, monkeypatch, caplog):
+    """SICHERHEITSNETZ: Das Lauf-Log eines oeffentlichen Repos liest jeder,
+    und GitHub schwaerzt nur den exakten Secret-Wert -- bei mehreren Chats
+    also keine einzelne ID.
+
+    Mutationstest: in send() chat_im_log(nummer) durch chat ersetzen
+    -> dieser Test muss rot werden.
+    """
+    cfg = dataclasses.replace(cfg, telegram_chats=("111222333", "43"))
+
+    def fake_post(url, json=None, timeout=None):
+        if json["chat_id"] == "111222333":
+            return FakeResponse({"ok": False, "error_code": 403,
+                                 "description": "bot was blocked by the user"})
+        return FakeResponse({"ok": True, "result": {}})
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    with caplog.at_level(logging.WARNING):
+        assert bot.send(cfg, "Hallo") == 1
+    assert "111222333" not in caplog.text
+    assert "Versand an Chat 1 fehlgeschlagen" in caplog.text
+
+
 def test_send_ohne_empfaenger(cfg):
     cfg = dataclasses.replace(cfg, telegram_chats=())
     with pytest.raises(TelegramError, match="Kein Empfaenger"):
@@ -2575,6 +2618,125 @@ def test_load_state_leerer_plan_bleibt_gueltig(tmp_path):
     pfad = tmp_path / "state.json"
     bot.save_state([], FENSTER, pfad)
     assert bot.load_state(pfad).exists is True
+
+
+SCHLUESSEL = "123456:AAH-test-token-zum-verschluesseln"
+
+
+def test_save_state_verschluesselt_verraet_nichts(tmp_path):
+    """SICHERHEITSNETZ: state.json liegt im oeffentlichen Repo. Mit
+    Schluessel darf darin nichts vom Stundenplan lesbar sein -- weder Fach
+    noch Raum, Infotext oder Datum.
+
+    Mutationstest: in _zustand_schreiben "if schluessel:" durch "if False:"
+    ersetzen -> dieser Test muss rot werden.
+    """
+    pfad = tmp_path / "state.json"
+    stunden = [lesson(subjects=("Mathe",), rooms=("R101",), note="Klausur", uid=7)]
+    assert bot.save_state(stunden, FENSTER, pfad, schluessel=SCHLUESSEL)
+    roh = pfad.read_text(encoding="utf-8")
+    for verraeterisch in ("Mathe", "R101", "Klausur", MO, "lessons"):
+        assert verraeterisch not in roh
+    huelle = json.loads(roh)
+    assert huelle["schema"] == bot.SCHEMA and huelle["saved_at"]
+    zustand = bot.load_state(pfad, SCHLUESSEL)
+    assert zustand.exists and list(zustand.lessons) == stunden
+    assert zustand.window == FENSTER
+
+
+def test_save_state_verschluesselt_schreibt_unveraendertes_nicht_neu(tmp_path):
+    """SICHERHEITSNETZ: Derselbe Inhalt ergibt verschluesselt jedes Mal
+    einen anderen Block. Verglichen wird deshalb der entschluesselte
+    Inhalt -- sonst entstuende alle fuenf Minuten ein Commit.
+
+    Mutationstest: in save_state den alten Zustand ohne Schluessel lesen
+    (_zustand_lesen(path, "")) -> dieser Test muss rot werden.
+    """
+    pfad = tmp_path / "state.json"
+    assert bot.save_state([lesson()], FENSTER, pfad, schluessel=SCHLUESSEL)
+    vorher = pfad.read_text(encoding="utf-8")
+    assert bot.save_state([lesson()], FENSTER, pfad, schluessel=SCHLUESSEL) is False
+    assert pfad.read_text(encoding="utf-8") == vorher
+    assert bot.save_state([lesson(rooms=("R9",))], FENSTER, pfad,
+                          schluessel=SCHLUESSEL) is True
+
+
+def test_save_state_verschluesselt_einen_klartext_zustand_sofort(tmp_path):
+    """Sonst bliebe der Plan offen im Repo, bis er sich zufaellig aendert."""
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson(subjects=("Mathe",))], FENSTER, pfad)
+    assert bot.load_state(pfad, SCHLUESSEL).exists     # Klartext bleibt lesbar
+    assert bot.save_state([lesson(subjects=("Mathe",))], FENSTER, pfad,
+                          schluessel=SCHLUESSEL) is True
+    assert "Mathe" not in pfad.read_text(encoding="utf-8")
+
+
+def test_save_state_ohne_schluessel_wieder_im_klartext(tmp_path):
+    """UNTISBOT_STATE_KEY=aus nimmt die Verschluesselung zurueck."""
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson(subjects=("Mathe",))], FENSTER, pfad, schluessel=SCHLUESSEL)
+    assert bot.save_state([lesson(subjects=("Mathe",))], FENSTER, pfad) is True
+    assert "Mathe" in pfad.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("schluessel,grund", [
+    ("ein-anderer-schluessel", "passt nicht"), ("", "aus")])
+def test_load_state_nicht_zu_oeffnen_ist_ein_erstlauf(tmp_path, caplog, schluessel,
+                                                        grund):
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson()], FENSTER, pfad, schluessel=SCHLUESSEL)
+    assert bot.load_state(pfad, schluessel).exists is False
+    assert grund in caplog.text
+    assert pfad.exists()                    # nicht beiseitegelegt
+
+
+def test_load_state_kaputter_block_ist_ein_erstlauf(tmp_path):
+    pfad = tmp_path / "state.json"
+    pfad.write_text(json.dumps({"schema": bot.SCHEMA, "saved_at": "",
+                                "verschluesselt": "kein-fernet-token"}))
+    assert bot.load_state(pfad, SCHLUESSEL).exists is False
+
+
+def test_check_mit_neuem_schluessel_meldet_nichts_und_laeuft_weiter(cfg, ablauf):
+    """SICHERHEITSNETZ: Ein neuer Bot-Token aendert den Schluessel. Der
+    alte Zustand laesst sich dann nicht mehr oeffnen -- das darf weder den
+    Bot lahmlegen (eine Ausnahme hier toetete jeden weiteren Lauf) noch
+    eine Meldungsflut ausloesen. Er merkt sich den Plan einfach neu.
+
+    Mutationstest: in load_state das "except ZustandGesperrt" streichen
+    -> dieser Test muss rot werden.
+    """
+    pfad = ablauf["pfad"]
+    bot.save_state([lesson(rooms=("R1",))], FENSTER, pfad, schluessel=SCHLUESSEL)
+    untis_liefert(ablauf, [lesson(rooms=("R2",))])
+    neu = dataclasses.replace(cfg, state_key="neuer-token:xyz")
+    ergebnis = bot.check_once(neu, state_path=pfad)
+    assert ergebnis.status == bot.OK and "Erster Lauf" in ergebnis.message
+    assert ablauf["gesendet"] == []
+    assert bot.load_state(pfad, "neuer-token:xyz").lessons[0].rooms == ("R2",)
+
+
+def test_check_reicht_den_schluessel_durch(cfg, ablauf):
+    pfad = ablauf["pfad"]
+    untis_liefert(ablauf, [lesson(subjects=("Mathe",))])
+    mit = dataclasses.replace(cfg, state_key=SCHLUESSEL)
+    bot.check_once(mit, state_path=pfad)
+    assert "Mathe" not in pfad.read_text(encoding="utf-8")
+    untis_liefert(ablauf, [lesson(subjects=("Mathe",), status=CANCELLED)])
+    assert bot.check_once(mit, state_path=pfad).changes == 1
+
+
+def test_save_state_behaelt_die_vorschau_notiz(tmp_path):
+    """check_once weiss nichts von der Abendvorschau und darf ihre Notiz
+    nicht loeschen -- sonst kaeme sie nach der Uebergabe doppelt."""
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson()], FENSTER, pfad, vorschau="2026-09-14")
+    assert bot.save_state([lesson()], FENSTER, pfad) is False
+    assert bot.save_state([lesson(rooms=("R1",))], FENSTER, pfad) is True
+    assert bot.load_state(pfad).vorschau == "2026-09-14"
+    assert bot.save_state([lesson(rooms=("R1",))], FENSTER, pfad,
+                          vorschau="2026-09-15") is True
+    assert bot.load_state(pfad).vorschau == "2026-09-15"
 
 
 def test_load_state_liest_pending(tmp_path):
@@ -3856,14 +4018,22 @@ def test_main_fehlgeschlagener_check_gibt_1(cli, monkeypatch):
     assert bot.main(["check"]) == 1
 
 
+class Gesehen(dict):
+    """Die Parameter, mit denen main() watch aufruft -- und daneben, was es
+    verdrahtet (Laufbericht, Postfach), das nicht in den Vergleich gehoert."""
+
+    verdrahtung: dict
+
+
 def watch_attrappe(monkeypatch):
     """Ersetzt watch und merkt sich, womit main() es aufruft."""
-    gesehen = {}
+    gesehen = Gesehen()
 
-    def fake_watch(_cfg, m, i, n, sleeper=None, anmelden=None):
-        postfach = isinstance(getattr(sleeper, "__self__", None), bot.Postfach)
+    def fake_watch(_cfg, m, i, n, sleeper=None, anmelden=None, bericht=None):
+        postfach = getattr(sleeper, "__self__", None)
         gesehen.update(minutes=m, interval=i, night=n, anmelden=anmelden,
-                       befehle=postfach)
+                       befehle=isinstance(postfach, bot.Postfach))
+        gesehen.verdrahtung = {"bericht": bericht, "postfach": postfach}
         return 0
 
     monkeypatch.setattr(bot, "watch", fake_watch)
@@ -3956,6 +4126,51 @@ def test_selftest_zeigt_den_benutzernamen_nicht_im_klartext(cfg, monkeypatch,
     assert "max.mustermann.2026" not in ausgabe
     # Diagnostisch weiterhin brauchbar: das richtige Konto bleibt erkennbar.
     assert bot.mask("max.mustermann.2026") in ausgabe
+
+
+def test_selftest_verraet_keine_chats(cfg, monkeypatch, capsys):
+    """SICHERHEITSNETZ: selftest laeuft auch in Actions, und dessen Log ist
+    oeffentlich. GitHub schwaerzt nur den exakten Secret-Wert: Bei
+    "111,222" blieben beide IDs lesbar, der Vorname sowieso.
+
+    Mutationstest: in selftest wieder "Chat {chat}" und den Vornamen
+    ausgeben -> dieser Test muss rot werden.
+    """
+    mehrere = dataclasses.replace(cfg, telegram_chats=("111222333", "-1009876543210"))
+    monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {
+        "username": "bot", "first_name": "Maximilian", "type": "private"})
+    monkeypatch.setattr(bot, "Untis", FakeUntis([lesson()]))
+    bot.selftest(mehrere)
+    ausgabe = capsys.readouterr().out
+    for verraeterisch in ("111222333", "9876543210", "Maximilian"):
+        assert verraeterisch not in ausgabe
+    assert "Chat 1 von 2" in ausgabe and "Chat 2 von 2" in ausgabe
+    assert "erreichbar (privat)" in ausgabe
+
+
+@pytest.mark.parametrize("schluessel_beim_speichern,erwartet", [
+    (None, "noch keine state.json"),
+    ("", "noch im Klartext"),
+    (SCHLUESSEL, "laesst sich oeffnen"),
+    ("anderer", "passt nicht")])
+def test_selftest_prueft_den_zustand(cfg, monkeypatch, capsys, tmp_path,
+                                     schluessel_beim_speichern, erwartet):
+    zugaenge_ok(monkeypatch)
+    pfad = tmp_path / "state.json"
+    if schluessel_beim_speichern is not None:
+        bot.save_state([lesson()], FENSTER, pfad, schluessel=schluessel_beim_speichern)
+    vorher = pfad.read_bytes() if pfad.exists() else None
+    assert bot.selftest(dataclasses.replace(cfg, state_key=SCHLUESSEL), pfad) == 0
+    assert erwartet in capsys.readouterr().out
+    assert (pfad.read_bytes() if pfad.exists() else None) == vorher   # nur gelesen
+
+
+def test_zustand_art(cfg):
+    assert "aus dem Bot-Token" in bot.zustand_art(
+        dataclasses.replace(cfg, state_key=cfg.telegram_token))
+    assert "UNTISBOT_STATE_KEY)" in bot.zustand_art(
+        dataclasses.replace(cfg, state_key="x"))
+    assert bot.zustand_art(cfg).startswith("unverschlüsselt")
 
 
 def zugaenge_ok(monkeypatch):
@@ -5135,6 +5350,8 @@ class TelegramWelt:
         self.uhr = Uhr()
         self.aufrufe = []
         self.gesendet = []
+        self.knoepfe = []                     # reply_markup je gesendeter Nachricht
+        self.bearbeitet = []
         self.geschlafen = []
 
     def __call__(self, _token, method, payload, timeout=None, attempts=None):
@@ -5143,8 +5360,19 @@ class TelegramWelt:
             if self.fehler and payload["chat_id"] in self.fehler:
                 raise bot.TelegramError("sendMessage -> 502")
             self.gesendet.append((payload["chat_id"], payload["text"]))
+            self.knoepfe.append(payload.get("reply_markup"))
             return {}
-        if method == "setMyCommands":
+        if method == "editMessageText":
+            if self.fehler == "bearbeiten":
+                raise bot.TelegramConfigError(
+                    "editMessageText -> 400: Bad Request: message can't be edited")
+            if self.fehler == "unveraendert":
+                raise bot.TelegramConfigError(
+                    "editMessageText -> 400: Bad Request: message is not modified")
+            self.bearbeitet.append((payload["chat_id"], payload["message_id"],
+                                    payload["text"], payload.get("reply_markup")))
+            return {}
+        if method in ("setMyCommands", "answerCallbackQuery"):
             return True
         if method == "getUpdates":
             if self.fehler == "getUpdates":
@@ -5170,9 +5398,13 @@ def telegram_welt(monkeypatch):
     def bauen(*abholungen, fehler=None):
         welt = TelegramWelt(*abholungen, fehler=fehler)
         monkeypatch.setattr(bot, "telegram_call", welt)
-        monkeypatch.setattr(bot, "tagesuebersicht_holen",
-                            lambda _cfg, morgen=False:
-                            "<b>📅 Dienstag</b>" if morgen else "<b>📅 Montag</b>")
+        monkeypatch.setattr(
+            bot, "tagesantwort", lambda _cfg, tag, _jetzt, morgen=False: (
+                ["<b>📅 Dienstag</b>" if morgen else "<b>📅 Montag</b>"],
+                bot.tag_knoepfe(tag)))
+        monkeypatch.setattr(
+            bot, "wochenantwort", lambda _cfg, montag, _jetzt: (
+                [f"<b>🗓 Woche {montag}</b>"], bot.woche_knoepfe(montag)))
         return welt
     return bauen
 
@@ -5287,66 +5519,611 @@ def test_postfach_setzt_das_befehlsmenue_einmal(cfg, telegram_welt):
     postfach.warten(120)
     menues = [a for a in welt.aufrufe if a[0] == "setMyCommands"]
     assert menues == [("setMyCommands", {"commands": [
-        {"command": "today", "description": "Stundenplan von heute"},
-        {"command": "tomorrow", "description": "Stundenplan von morgen"}]})]
+        {"command": k, "description": v} for k, v in bot.BEFEHLE.items()]})]
+    assert list(bot.BEFEHLE) == ["today", "tomorrow", "week", "day", "status"]
+    # Telegrams Regeln fuer das Menue: klein, kurz, ohne Sonderzeichen.
+    for befehl, beschreibung in bot.BEFEHLE.items():
+        assert re.fullmatch(r"[a-z0-9_]{1,32}", befehl) and len(beschreibung) <= 256
 
 
-def test_tagesuebersicht_holen_frisch_aus_webuntis(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "now_local",
-                        lambda _tz: dt.datetime(2026, 9, 14, 6, 50))
+def test_tagesantwort_frisch_aus_webuntis(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis", FakeUntis(
         [lesson(rooms=("R1",)), lesson(date=DI, uid=2)], periods=RASTER))
-    text = bot.tagesuebersicht_holen(cfg)
+    (text,), knoepfe = bot.tagesantwort(cfg, dt.date(2026, 9, 14),
+                                         dt.datetime(2026, 9, 14, 6, 50))
     assert "<b>1.</b> 07:40–08:25 · <b>M</b> · R1" in text
     assert "1 Stunde" in text and "Stand 06:50 Uhr" in text
+    assert knoepfe == bot.tag_knoepfe(dt.date(2026, 9, 14))
 
 
-def test_tagesuebersicht_holen_ferien(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "now_local",
-                        lambda _tz: dt.datetime(2026, 9, 19, 9, 0))
+def test_tagesantwort_ferien(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis",
                         FakeUntis(fehler=bot.NothingToDo("Wochenende")))
-    assert "Keine Stunden im Plan." in bot.tagesuebersicht_holen(cfg)
+    (text,), _ = bot.tagesantwort(cfg, SA, dt.datetime(2026, 9, 19, 9, 0))
+    assert "Keine Stunden im Plan." in text
 
 
-def test_tagesuebersicht_holen_webuntis_weg(cfg, monkeypatch):
+def test_tagesantwort_webuntis_weg(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis",
                         FakeUntis(fehler=bot.UntisError("Server weg")))
-    assert "WebUntis antwortet gerade nicht" in bot.tagesuebersicht_holen(cfg)
-    assert "WebUntis antwortet gerade nicht" in bot.tagesuebersicht_holen(
-        cfg, morgen=True)
+    jetzt = dt.datetime(2026, 9, 14, 6, 50)
+    for antwort in (bot.tagesantwort(cfg, SA, jetzt),
+                    bot.tagesantwort(cfg, SA, jetzt, morgen=True),
+                    bot.wochenantwort(cfg, dt.date(2026, 9, 14), jetzt)):
+        assert antwort == ([bot.WEBUNTIS_WEG], None)
 
 
-def test_tagesuebersicht_holen_heute_nur_einen_tag(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "now_local",
-                        lambda _tz: dt.datetime(2026, 9, 14, 6, 50))
+def test_tagesantwort_heute_nur_einen_tag(cfg, monkeypatch):
     untis = FakeUntis([lesson()], periods=RASTER)
     monkeypatch.setattr(bot, "Untis", untis)
-    bot.tagesuebersicht_holen(cfg)
+    bot.tagesantwort(cfg, dt.date(2026, 9, 14), dt.datetime(2026, 9, 14, 6, 50))
     assert untis.abrufe == [(dt.date(2026, 9, 14), dt.date(2026, 9, 14))]
 
 
-def test_tagesuebersicht_holen_morgen_holt_eine_woche(cfg, monkeypatch):
+def test_tagesantwort_morgen_holt_eine_woche(cfg, monkeypatch):
     """Ein Abruf fuer morgen und die Tage danach: Ist morgen frei, steht der
-    naechste Schultag schon in derselben Antwort."""
-    monkeypatch.setattr(bot, "now_local",
-                        lambda _tz: dt.datetime(2026, 9, 18, 21, 30))   # Freitag
+    naechste Schultag schon in derselben Antwort -- und die Knoepfe
+    blaettern von dem Tag aus, der zu sehen ist."""
     untis = FakeUntis([lesson(date=NAECHSTER_MO, rooms=("R1",))], periods=RASTER)
     monkeypatch.setattr(bot, "Untis", untis)
-    text = bot.tagesuebersicht_holen(cfg, morgen=True)
+    (text,), knoepfe = bot.tagesantwort(cfg, SA, dt.datetime(2026, 9, 18, 21, 30),
+                                         morgen=True)
     assert untis.abrufe == [(SA, SA + dt.timedelta(days=bot.SCHULTAG_SUCHE - 1))]
     assert "Der nächste Schultag" in text and "Montag, 21.09." in text
     assert "<b>1.</b> 07:40–08:25 · <b>M</b> · R1" in text
     assert "Stand 21:30 Uhr" in text
+    assert knoepfe == bot.tag_knoepfe(dt.date(2026, 9, 21))
 
 
-def test_tagesuebersicht_holen_morgen_in_den_ferien(cfg, monkeypatch):
-    monkeypatch.setattr(bot, "now_local",
-                        lambda _tz: dt.datetime(2026, 9, 18, 21, 30))
+def test_tagesantwort_morgen_in_den_ferien(cfg, monkeypatch):
     monkeypatch.setattr(bot, "Untis",
                         FakeUntis(fehler=bot.NothingToDo("Ferien")))
-    text = bot.tagesuebersicht_holen(cfg, morgen=True)
+    (text,), _ = bot.tagesantwort(cfg, SA, dt.datetime(2026, 9, 18, 21, 30),
+                                  morgen=True)
     assert text.startswith("<b>📅 Samstag, 19.09.</b>\nKeine Stunden im Plan.")
+
+
+def test_wochenantwort_holt_die_ganze_woche(cfg, monkeypatch):
+    untis = FakeUntis([lesson(), lesson(date=DI, uid=2)], periods=RASTER)
+    monkeypatch.setattr(bot, "Untis", untis)
+    montag = dt.date(2026, 9, 14)
+    teile, knoepfe = bot.wochenantwort(cfg, montag, dt.datetime(2026, 9, 13, 18, 0))
+    assert untis.abrufe == [(montag, montag + dt.timedelta(days=6))]
+    assert "Woche vom 14.09. bis 18.09." in teile[0]
+    assert knoepfe == bot.woche_knoepfe(montag)
+
+
+# ===========================================================================
+#  Woche, einzelne Tage, Knoepfe
+# ===========================================================================
+
+@pytest.mark.parametrize("text,erwartet", [
+    ("/day freitag", ("day", "freitag")), ("/tag@MeinBot 14.10.", ("day", "14.10.")),
+    ("/woche", ("week", "")), ("/WEEK  21.09. ", ("week", "21.09.")),
+    ("Woche", ("week", "")), ("heute", ("today", "")), (" Status ", ("status", "")),
+    ("Morgen", ("tomorrow", "")), ("hallo", None), ("Heute ist Sport", None),
+    ("/", ("", ""))])
+def test_befehl_aus_text(text, erwartet):
+    assert bot.befehl_aus_text(text) == erwartet
+
+
+def test_befehle_aus_nimmt_die_tastatur_ohne_schraegstrich():
+    abholung = bot.befehle_aus([update(1, "Woche"), update(2, "na?")], ("42",),
+                               UNIX_JETZT)
+    assert abholung.befehle == (("42", "week"),) and abholung.offset == 3
+
+
+def knopfdruck(nummer, daten, chat=42, nachricht=77, alter=5):
+    return {"update_id": nummer, "callback_query": {
+        "id": f"cb{nummer}", "data": daten,
+        "message": {"message_id": nachricht, "date": UNIX_JETZT - alter,
+                    "chat": {"id": chat, "type": "private"}}}}
+
+
+def test_befehle_aus_liest_knoepfe():
+    """Ein Knopf traegt seine Nachricht mit, damit sie bearbeitet statt neu
+    geschickt wird -- und gilt ohne Altersgrenze: Das Datum gehoert zur
+    Nachricht, nicht zum Druck."""
+    abholung = bot.befehle_aus(
+        [knopfdruck(5, "day:2026-10-14", alter=3 * 24 * 3600)], ("42",), UNIX_JETZT)
+    assert abholung.auftraege == (
+        bot.Auftrag("42", "day", "2026-10-14", nachricht=77, rueckruf="cb5"),)
+    assert abholung.offset == 6
+
+
+def test_befehle_aus_knoepfe_nur_aus_eingetragenen_chats():
+    abholung = bot.befehle_aus([knopfdruck(5, "day:2026-10-14", chat=999)],
+                               ("42",), UNIX_JETZT)
+    assert abholung.auftraege == () and abholung.fremde == ("999",)
+
+
+@pytest.mark.parametrize("text,erwartet", [
+    ("montag", "2026-09-21"), ("Mo", "2026-09-21"), ("mi", "2026-09-16"),
+    ("Mittwoch", "2026-09-16"), ("do.", "2026-09-17"), ("so", "2026-09-20"),
+    ("morgen", "2026-09-17"), ("Übermorgen", "2026-09-18"), ("heute", "2026-09-16"),
+    ("14.10.", "2026-10-14"), ("1.9", "2026-09-01"), ("14.10.27", "2027-10-14"),
+    ("14.10.2027", "2027-10-14"), ("2026-10-14", "2026-10-14"),
+    ("30.02.", None), ("31.4.2026", None), ("quatsch", None), ("", None),
+    ("m", None), ("1", None)])
+def test_tag_aus(text, erwartet):
+    heute = dt.date(2026, 9, 16)                        # ein Mittwoch
+    tag = bot.tag_aus(text, heute)
+    assert (tag.isoformat() if tag else None) == erwartet
+
+
+def test_tag_aus_datum_ohne_jahr_ueber_den_jahreswechsel():
+    assert bot.tag_aus("07.01.", dt.date(2026, 12, 20)) == dt.date(2027, 1, 7)
+    assert bot.tag_aus("20.12.", dt.date(2027, 1, 7)) == dt.date(2026, 12, 20)
+    assert bot.tag_aus("29.02.", dt.date(2027, 6, 1)) == dt.date(2028, 2, 29)
+
+
+@pytest.mark.parametrize("heute,montag", [
+    ("2026-09-14", "2026-09-14"), ("2026-09-18", "2026-09-14"),
+    ("2026-09-19", "2026-09-21"), ("2026-09-20", "2026-09-21")])
+def test_woche_fuer(heute, montag):
+    assert bot.woche_fuer(dt.date.fromisoformat(heute)) == dt.date.fromisoformat(montag)
+
+
+def woche():
+    return [lesson(start="07:40", end="08:25", uid=1),
+            lesson(start="08:30", end="09:15", uid=2),
+            lesson(date=DI, subjects=("D",), status=CANCELLED, uid=3),
+            lesson(date="2026-09-17", subjects=("E",), status=bot.IRREGULAR, uid=4),
+            lesson(date="2026-09-25", subjects=("X",), uid=5)]   # naechste Woche
+
+
+def test_wochenuebersicht_klappt_nur_normale_tage_zu():
+    """Ausfaelle und Aenderungen sollen ohne Tippen zu sehen sein."""
+    (text,) = bot.wochenuebersicht(woche(), dt.date(2026, 9, 14), RASTER,
+                                   dt.datetime(2026, 9, 13, 18, 0))
+    assert text.startswith("<b>🗓 Woche vom 14.09. bis 18.09.</b>")
+    assert ("<b>Montag, 14.09.</b> · 2 Stunden\n<blockquote expandable>"
+            "▫️ <b>1./2.</b> 07:40–09:15 · <b>M</b></blockquote>") in text
+    assert "❌ <b>Dienstag, 15.09.</b> · 1 Stunde · 1 entfällt\n<blockquote>" in text
+    assert "⚠️ <b>Donnerstag, 17.09.</b> · 1 Stunde · 1 geändert\n<blockquote>" in text
+    assert "<b>Mittwoch, 16.09.</b> · keine Stunden im Plan" in text
+    assert "Samstag" not in text and "<b>X</b>" not in text
+    assert text.endswith("<i>Woche: 4 Stunden · 1 entfällt · 1 geändert</i>\n"
+                         "<i>Stand 18:00 Uhr</i>")
+
+
+def test_wochenuebersicht_zeigt_samstag_nur_mit_unterricht():
+    (text,) = bot.wochenuebersicht([lesson(date="2026-09-19")], dt.date(2026, 9, 14))
+    assert "Samstag, 19.09." in text and "Sonntag" not in text
+
+
+def test_wochenuebersicht_ohne_unterricht():
+    assert bot.wochenuebersicht([], dt.date(2026, 9, 14)) == [
+        "<b>🗓 Woche vom 14.09. bis 18.09.</b>\nKeine Stunden im Plan."]
+
+
+def test_wochenuebersicht_teilt_an_tagesgrenzen():
+    """split() schneidet an Zeilen und kennt keine Zitatbloecke ueber
+    mehrere -- eine lange Woche wird deshalb an Tagesgrenzen geteilt, und
+    jeder Teil ist fuer sich gueltiges HTML."""
+    stunden = [lesson(date=(dt.date(2026, 9, 14) + dt.timedelta(days=t)).isoformat(),
+                      start=a, end=e, subjects=(f"F{t}{i}",), note="x" * 60,
+                      uid=10 * t + i)
+               for t in range(5) for i, (a, e, _n) in enumerate(RASTER[0])]
+    teile = bot.wochenuebersicht(stunden, dt.date(2026, 9, 14), RASTER, limit=1200)
+    assert len(teile) > 1
+    for teil in teile:
+        assert len(teil) <= 1200
+        assert teil.count("<blockquote") == teil.count("</blockquote>")
+    ganz = "\n".join(teile)
+    for name in ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Woche: "):
+        assert ganz.count(name) == 1
+
+
+def test_tag_knoepfe_blaettern_ueber_das_wochenende():
+    (reihe,) = bot.tag_knoepfe(dt.date(2026, 9, 18))["inline_keyboard"]   # Freitag
+    assert [k["text"] for k in reihe] == ["‹ Do 17.09.", "Woche", "Mo 21.09. ›"]
+    assert [k["callback_data"] for k in reihe] == [
+        "day:2026-09-17", "week:2026-09-14", "day:2026-09-21"]
+    (reihe,) = bot.tag_knoepfe(dt.date(2026, 9, 14))["inline_keyboard"]   # Montag
+    assert reihe[0]["callback_data"] == "day:2026-09-11"
+
+
+def test_woche_knoepfe():
+    (reihe,) = bot.woche_knoepfe(dt.date(2026, 9, 14))["inline_keyboard"]
+    assert [k["callback_data"] for k in reihe] == [
+        "week:2026-09-07", "today:", "week:2026-09-21"]
+
+
+def test_knoepfe_passen_in_telegrams_grenze():
+    """callback_data darf hoechstens 64 Bytes lang sein -- sonst lehnt
+    Telegram die ganze Nachricht ab."""
+    for markup in (bot.tag_knoepfe(dt.date(2026, 12, 31)),
+                   bot.woche_knoepfe(dt.date(2026, 12, 28))):
+        for knopf in markup["inline_keyboard"][0]:
+            assert len(knopf["callback_data"].encode()) <= 64
+            befehl, _ = bot.befehl_aus_text(
+                "/" + knopf["callback_data"].replace(":", " ", 1))
+            assert befehl in bot.KNOPF_BEFEHLE
+
+
+def test_tastatur_versteht_sich_selbst():
+    """Jede Aufschrift der Tastatur muss als Befehl ankommen."""
+    for reihe in bot.TASTATUR["keyboard"]:
+        for knopf in reihe:
+            befehl, _ = bot.befehl_aus_text(knopf["text"])
+            assert befehl in bot.BEFEHLE
+
+
+def test_postfach_knopf_bearbeitet_seine_nachricht(cfg, telegram_welt):
+    welt = telegram_welt([knopfdruck(7, "day:2026-09-15")])
+    welt.postfach(cfg).warten(60)
+    assert ("answerCallbackQuery", {"callback_query_id": "cb7"}) in welt.aufrufe
+    assert welt.bearbeitet == [("42", 77, "<b>📅 Montag</b>",
+                                bot.tag_knoepfe(dt.date(2026, 9, 15)))]
+    assert welt.gesendet == []
+
+
+def test_postfach_knopf_schickt_neu_wenn_bearbeiten_scheitert(cfg, telegram_welt):
+    welt = telegram_welt([knopfdruck(7, "week:2026-09-14")], fehler="bearbeiten")
+    welt.postfach(cfg).warten(60)
+    assert welt.gesendet == [("42", "<b>🗓 Woche 2026-09-14</b>")]
+    assert welt.knoepfe == [bot.woche_knoepfe(dt.date(2026, 9, 14))]
+
+
+def test_postfach_knopf_zweimal_gedrueckt_schickt_nichts_neu(cfg, telegram_welt):
+    welt = telegram_welt([knopfdruck(7, "day:2026-09-15")], fehler="unveraendert")
+    welt.postfach(cfg).warten(60)
+    assert welt.gesendet == []
+
+
+def test_postfach_fremder_knopf_wird_nur_quittiert(cfg, telegram_welt):
+    """Knoepfe gibt es nur fuer Tag und Woche. Ein anderer waere veraltet
+    oder gebastelt -- quittieren, sonst nichts."""
+    welt = telegram_welt([knopfdruck(7, "status:"), knopfdruck(8, "quatsch")])
+    welt.postfach(cfg).warten(60)
+    quittiert = [a for a in welt.aufrufe if a[0] == "answerCallbackQuery"]
+    assert len(quittiert) == 2
+    assert welt.gesendet == [] and welt.bearbeitet == []
+
+
+def test_postfach_lange_woche_per_knopf_kommt_als_neue_nachrichten(cfg, telegram_welt,
+                                                                  monkeypatch):
+    welt = telegram_welt([knopfdruck(7, "week:2026-09-14")])
+    monkeypatch.setattr(bot, "wochenantwort", lambda *_a: (
+        ["Teil 1", "Teil 2"], bot.woche_knoepfe(dt.date(2026, 9, 14))))
+    welt.postfach(cfg).warten(60)
+    assert welt.bearbeitet == []
+    assert [t for _c, t in welt.gesendet] == ["Teil 1", "Teil 2"]
+    assert welt.knoepfe == [None, bot.woche_knoepfe(dt.date(2026, 9, 14))]
+
+
+def test_postfach_holt_auch_knoepfe_ab(cfg, telegram_welt):
+    welt = telegram_welt()
+    welt.postfach(cfg).warten(60)
+    abholungen = [a for a in welt.aufrufe if a[0] == "getUpdates"]
+    assert abholungen[0][1]["allowed_updates"] == ["message", "callback_query"]
+
+
+def test_postfach_day_und_week(cfg, telegram_welt, monkeypatch):
+    monkeypatch.setattr(bot, "now_local", lambda _tz: dt.datetime(2026, 9, 16, 7, 0))
+    welt = telegram_welt([update(1, "/day freitag"), update(2, "/tag"),
+                          update(3, "/week"), update(4, "/woche 1.10.")])
+    welt.postfach(cfg).warten(60)
+    assert [t for _c, t in welt.gesendet] == [
+        "<b>📅 Montag</b>", bot.TAG_HILFE,
+        "<b>🗓 Woche 2026-09-14</b>", "<b>🗓 Woche 2026-09-28</b>"]
+    assert welt.knoepfe[0] == bot.tag_knoepfe(dt.date(2026, 9, 18))
+
+
+def test_postfach_status_und_hilfe_bringen_die_tastatur(cfg, telegram_welt):
+    welt = telegram_welt([update(1, "/status"), update(2, "/start")])
+    welt.postfach(cfg).warten(60)
+    status, hilfe = (t for _c, t in welt.gesendet)
+    assert "noch keine Abfrage" in status and "/week" in hilfe
+    assert welt.knoepfe == [bot.TASTATUR, bot.TASTATUR]
+
+
+def test_send_haengt_knoepfe_an_den_letzten_teil(cfg, monkeypatch):
+    aufrufe = antworten(monkeypatch)
+    knoepfe = bot.tag_knoepfe(dt.date(2026, 9, 14))
+    bot.send(cfg, "\n".join(["x" * 100] * 100), knoepfe=knoepfe)
+    markups = [a["payload"].get("reply_markup") for a in aufrufe]
+    assert len(markups) > 1 and markups[-1] == knoepfe
+    assert all(m is None for m in markups[:-1])
+
+
+# ===========================================================================
+#  Abendvorschau
+# ===========================================================================
+
+ACHTZEHN = dt.time(18, 0)
+
+
+@pytest.mark.parametrize("jetzt,erledigt,erwartet", [
+    (dt.datetime(2026, 9, 14, 17, 59), "", ""),
+    (dt.datetime(2026, 9, 14, 18, 0), "", "tag"),
+    (dt.datetime(2026, 9, 14, 23, 50), "", "tag"),
+    (dt.datetime(2026, 9, 14, 18, 5), "2026-09-14", ""),
+    (dt.datetime(2026, 9, 14, 18, 5), "2026-09-13", "tag"),
+    (dt.datetime(2026, 9, 18, 18, 5), "", "tag"),          # Freitag: Abruf entscheidet
+    (dt.datetime(2026, 9, 20, 18, 5), "", "woche")])        # Sonntag
+def test_vorschau_faellig(jetzt, erledigt, erwartet):
+    assert bot.vorschau_faellig(jetzt, ACHTZEHN, erledigt) == erwartet
+
+
+def test_vorschau_faellig_ausgeschaltet():
+    assert bot.vorschau_faellig(dt.datetime(2026, 9, 14, 20, 0), None, "") == ""
+
+
+def test_vorschau_teile_tag():
+    (text,) = bot.vorschau_teile("tag", [lesson(date=DI), lesson(date=MI, uid=2)],
+                                 dt.date(2026, 9, 15), RASTER)
+    assert text.startswith("<i>🌙 Vorschau auf morgen</i>\n<b>📅 Dienstag, 15.09.</b>")
+    assert "1 Stunde" in text
+
+
+def test_vorschau_teile_schweigt_ohne_unterricht():
+    assert bot.vorschau_teile("tag", [lesson(date=MI)], dt.date(2026, 9, 15)) == []
+    assert bot.vorschau_teile("woche", [lesson(date="2026-09-28")],
+                              dt.date(2026, 9, 21)) == []
+
+
+def test_vorschau_teile_nur_aenderungen():
+    normal = [lesson(date=DI)]
+    assert bot.vorschau_teile("tag", normal, dt.date(2026, 9, 15),
+                              nur_aenderungen=True) == []
+    ausfall = [lesson(date=DI), lesson(date=DI, start="08:30", status=CANCELLED, uid=2)]
+    assert bot.vorschau_teile("tag", ausfall, dt.date(2026, 9, 15),
+                              nur_aenderungen=True)
+
+
+def test_vorschau_teile_woche():
+    teile = bot.vorschau_teile("woche", [lesson()], dt.date(2026, 9, 14))
+    assert teile == bot.wochenuebersicht([lesson()], dt.date(2026, 9, 14))
+
+
+@pytest.fixture
+def abend(cfg, monkeypatch, tmp_path):
+    """Montagabend 18:05, ein gespeicherter Zustand, WebUntis mit Dienstag."""
+    welt = {"gesendet": [], "commits": 0, "jetzt": dt.datetime(2026, 9, 14, 18, 5)}
+    pfad = tmp_path / "state.json"
+    bot.save_state([lesson()], FENSTER, pfad)
+    untis = FakeUntis([lesson(date=DI, rooms=("R1",))], periods=RASTER)
+    monkeypatch.setattr(bot, "Untis", untis)
+    monkeypatch.setattr(bot, "now_local", lambda _tz: welt["jetzt"])
+    monkeypatch.setattr(bot, "send", lambda _c, text, knoepfe=None, **_k:
+                        welt["gesendet"].append((text, knoepfe)) or 1)
+
+    def commit(_pfad):
+        welt["commits"] += 1
+        return True
+
+    monkeypatch.setattr(bot, "commit_state", commit)
+    welt.update(pfad=pfad, untis=untis,
+                cfg=dataclasses.replace(cfg, abendvorschau=ACHTZEHN))
+    return welt
+
+
+def test_abendvorschau_schickt_morgen_mit_knoepfen(abend):
+    erledigt = bot.abendvorschau(abend["cfg"], "", abend["pfad"])
+    assert erledigt == "2026-09-14"
+    ((text, knoepfe),) = abend["gesendet"]
+    assert "Dienstag, 15.09." in text and "R1" in text
+    assert knoepfe == bot.tag_knoepfe(dt.date(2026, 9, 15))
+    assert abend["untis"].abrufe == [(dt.date(2026, 9, 15), dt.date(2026, 9, 15))]
+    assert bot.load_state(abend["pfad"]).vorschau == "2026-09-14"
+    assert abend["commits"] == 1
+
+
+def test_abendvorschau_kommt_nach_der_uebergabe_nicht_doppelt(abend):
+    """SICHERHEITSNETZ: Die Laufkette uebergibt mehrmals am Tag an einen
+    neuen Lauf, der nichts im Speicher hat. Die Notiz in state.json haelt
+    die Vorschau dann bei einer am Abend.
+
+    Mutationstest: in abendvorschau die Abfrage "load_state(...).vorschau
+    == heute" streichen -> dieser Test muss rot werden.
+    """
+    bot.abendvorschau(abend["cfg"], "", abend["pfad"])
+    abend["jetzt"] = dt.datetime(2026, 9, 14, 21, 0)
+    assert bot.abendvorschau(abend["cfg"], "", abend["pfad"]) == "2026-09-14"
+    assert len(abend["gesendet"]) == 1
+
+
+def test_abendvorschau_ohne_speicherbaren_zustand_trotzdem_nur_einmal(abend):
+    """Laesst sich die Notiz nicht speichern, haelt der Rueckgabewert die
+    Vorschau im laufenden Lauf bei einer -- sonst kaeme sie alle fuenf
+    Minuten."""
+    abend["pfad"].unlink()
+    erledigt = bot.abendvorschau(abend["cfg"], "", abend["pfad"])
+    assert bot.abendvorschau(abend["cfg"], erledigt, abend["pfad"]) == erledigt
+    assert len(abend["gesendet"]) == 1
+
+
+def test_abendvorschau_ohne_unterricht_schweigt_und_fragt_nicht_wieder(abend):
+    abend["untis"].lessons = []
+    erledigt = bot.abendvorschau(abend["cfg"], "", abend["pfad"])
+    assert erledigt == "2026-09-14" and abend["gesendet"] == []
+    bot.abendvorschau(abend["cfg"], erledigt, abend["pfad"])
+    assert len(abend["untis"].abrufe) == 1
+
+
+def test_abendvorschau_sonntags_die_woche(abend):
+    abend["jetzt"] = dt.datetime(2026, 9, 20, 18, 5)
+    abend["untis"].lessons = [lesson(date=NAECHSTER_MO)]
+    bot.abendvorschau(abend["cfg"], "", abend["pfad"])
+    ((text, knoepfe),) = abend["gesendet"]
+    assert "Woche vom 21.09. bis 25.09." in text
+    assert knoepfe == bot.woche_knoepfe(dt.date(2026, 9, 21))
+    assert abend["untis"].abrufe == [(dt.date(2026, 9, 21), dt.date(2026, 9, 27))]
+
+
+def test_abendvorschau_vor_der_zeit_und_ausgeschaltet_tut_nichts(abend):
+    abend["jetzt"] = dt.datetime(2026, 9, 14, 17, 0)
+    assert bot.abendvorschau(abend["cfg"], "", abend["pfad"]) == ""
+    aus = dataclasses.replace(abend["cfg"], abendvorschau=None)
+    abend["jetzt"] = dt.datetime(2026, 9, 14, 19, 0)
+    assert bot.abendvorschau(aus, "", abend["pfad"]) == ""
+    assert abend["untis"].abrufe == [] and abend["gesendet"] == []
+
+
+def test_abendvorschau_stoert_die_ueberwachung_nie(abend, caplog):
+    """SICHERHEITSNETZ: Die Vorschau laeuft in der Schleife von watch(),
+    deren Netz nur check_once faengt. Ein Fehler hier -- WebUntis weg,
+    Telegram weg -- darf den Lauf nicht beenden; der naechste Durchlauf
+    versucht es erneut.
+
+    Mutationstest: in abendvorschau das try/except entfernen -> dieser Test
+    muss rot werden.
+    """
+    abend["untis"].fehler = bot.UntisError("Server weg")
+    assert bot.abendvorschau(abend["cfg"], "", abend["pfad"]) == ""
+    assert "Abendvorschau nicht verschickt" in caplog.text
+    abend["untis"].fehler = None
+    assert bot.abendvorschau(abend["cfg"], "", abend["pfad"]) == "2026-09-14"
+    assert len(abend["gesendet"]) == 1
+
+
+def test_abendvorschau_verschluesselt_bleibt_verschluesselt(abend):
+    abend["pfad"].unlink()
+    mit = dataclasses.replace(abend["cfg"], state_key=SCHLUESSEL)
+    bot.save_state([lesson(subjects=("Mathe",))], FENSTER, abend["pfad"],
+                   schluessel=SCHLUESSEL)
+    bot.abendvorschau(mit, "", abend["pfad"])
+    assert "Mathe" not in abend["pfad"].read_text(encoding="utf-8")
+    assert bot.load_state(abend["pfad"], SCHLUESSEL).vorschau == "2026-09-14"
+
+
+def test_watch_ruft_die_abendvorschau_nur_nach_gelungenen_durchlaeufen(cfg,
+                                                                      monkeypatch):
+    ergebnisse = iter([bot.Result(bot.OK), bot.Result(bot.FAILED),
+                       bot.Result(bot.IDLE)])
+    monkeypatch.setattr(bot, "check_once", lambda _c: next(ergebnisse))
+    aufrufe = []
+
+    def vorschau(_cfg, erledigt):
+        aufrufe.append(erledigt)
+        return f"tag{len(aufrufe)}"
+
+    monkeypatch.setattr(bot, "abendvorschau", vorschau)
+    uhr = Uhr()
+    bot.watch(cfg, 15, 300, sleeper=lambda s: setattr(uhr, "jetzt", uhr.jetzt + s),
+              clock=uhr)
+    assert aufrufe == ["", "tag1"]             # nicht nach dem Fehlschlag
+
+
+@pytest.mark.parametrize("wert,erwartet", [
+    ("18:00", dt.time(18, 0)), ("19.30", dt.time(19, 30)), ("7", dt.time(7, 0)),
+    ("aus", None), ("", None), ("25:00", None), ("abends", None)])
+def test_uhrzeit_aus(wert, erwartet):
+    assert bot.uhrzeit_aus(wert) == erwartet
+
+
+def test_config_abendvorschau(env, caplog):
+    cfg = Config.from_env()
+    assert cfg.abendvorschau == dt.time(18, 0) and cfg.vorschau_nur_aenderungen is False
+    env.setenv("UNTISBOT_ABENDVORSCHAU", "19:15")
+    env.setenv("UNTISBOT_ABENDVORSCHAU_NUR_AENDERUNGEN", "Ja")
+    cfg = Config.from_env()
+    assert cfg.abendvorschau == dt.time(19, 15) and cfg.vorschau_nur_aenderungen
+    env.setenv("UNTISBOT_ABENDVORSCHAU", "aus")
+    assert Config.from_env().abendvorschau is None
+    env.setenv("UNTISBOT_ABENDVORSCHAU", "abends")
+    assert Config.from_env().abendvorschau is None
+    assert "keine Uhrzeit" in caplog.text
+
+
+def test_config_von_hand_sendet_keine_vorschau(cfg):
+    """Ein in Tests gebautes Config-Objekt darf nie von selbst WebUntis
+    fragen und Telegram anschreiben."""
+    assert cfg.abendvorschau is None
+
+
+# ===========================================================================
+#  /status
+# ===========================================================================
+
+def bericht(**felder):
+    werte = dict(lauf="102", beginn=dt.datetime(2026, 9, 14, 8, 0),
+                 durchlaeufe=26, letzte=dt.datetime(2026, 9, 14, 10, 5),
+                 ergebnis=bot.OK, meldung="Keine Aenderungen (45 Stunden)",
+                 naechste=dt.datetime(2026, 9, 14, 10, 10), nachfolger=True)
+    werte.update(felder)
+    return bot.Laufbericht(**werte)
+
+
+def test_statusbericht(cfg):
+    mit = dataclasses.replace(cfg, abendvorschau=ACHTZEHN, state_key=cfg.telegram_token)
+    text = bot.statusbericht(bericht(), mit, dt.datetime(2026, 9, 14, 10, 7))
+    assert text.startswith("<b>🤖 untisbot läuft</b>")
+    for zeile in ("Letzte Abfrage: 10:05 Uhr · in Ordnung",
+                  "<i>Keine Aenderungen (45 Stunden)</i>",
+                  "Nächste Abfrage: gegen 10:10 Uhr",
+                  "Lauf #102 seit 2 Std. 7 Min. · 26 Abfragen",
+                  "Nachfolger: angemeldet", "Abendvorschau: 18:00 Uhr",
+                  "Zustand: verschlüsselt (Schlüssel aus dem Bot-Token)",
+                  f"<i>Version {bot.VERSION}</i>"):
+        assert zeile in text
+
+
+def test_statusbericht_bei_stoerung(cfg):
+    text = bot.statusbericht(
+        bericht(ergebnis=bot.FAILED, fehlschlaege=2, meldung="Server <weg>",
+                nachfolger=False),
+        dataclasses.replace(cfg, abendvorschau=ACHTZEHN, vorschau_nur_aenderungen=True),
+        dt.datetime(2026, 9, 14, 8, 3))
+    assert text.startswith("<b>⚠️ untisbot hat gerade Probleme</b>")
+    assert "fehlgeschlagen (2× in Folge)" in text and "Server &lt;weg&gt;" in text
+    assert "noch nicht angemeldet (kommt nach 20 Minuten)" in text
+    assert "seit 3 Min." in text and "18:00 Uhr, nur bei Änderungen" in text
+
+
+def test_statusbericht_ohne_kette_und_ohne_pruefung(cfg):
+    text = bot.statusbericht(bericht(nachfolger=None, lauf=""), cfg,
+                             dt.datetime(2026, 9, 14, 10, 7))
+    assert "Nachfolger" not in text and "Dieser Lauf seit" in text
+    assert "Abendvorschau: aus" in text and "unverschlüsselt" in text
+    assert "noch keine Abfrage" in bot.statusbericht(None, cfg,
+                                                     dt.datetime(2026, 9, 14))
+
+
+@pytest.mark.parametrize("sekunden,text", [
+    (0, "0 Min."), (59 * 60, "59 Min."), (60 * 60, "1 Std. 0 Min."),
+    (5 * 3600 + 29 * 60 + 59, "5 Std. 29 Min.")])
+def test_dauer_text(sekunden, text):
+    assert bot.dauer_text(sekunden) == text
+
+
+def test_watch_fuehrt_den_laufbericht(cfg, monkeypatch):
+    zeiten = iter(dt.datetime(2026, 9, 14, 8, m) for m in range(0, 60))
+    monkeypatch.setattr(bot, "now_local", lambda _tz: next(zeiten))
+    monkeypatch.setattr(bot, "check_once", lambda _c: bot.Result(bot.OK, message="gut"))
+    uhr = Uhr()
+    gesehen = []
+
+    def schlafen(sekunden):
+        gesehen.append(dataclasses.replace(lauf))
+        uhr.jetzt += sekunden
+
+    lauf = bot.Laufbericht(lauf="7")
+    bot.watch(cfg, 11, 300, sleeper=schlafen, clock=uhr,
+              anmelden=lambda: "main", bericht=lauf)
+    erster = gesehen[0]
+    assert erster.beginn == dt.datetime(2026, 9, 14, 8, 0)
+    assert erster.durchlaeufe == 1 and erster.ergebnis == bot.OK
+    assert erster.meldung == "gut" and erster.nachfolger is False
+    assert erster.naechste == erster.letzte + dt.timedelta(seconds=300)
+    assert gesehen[1].durchlaeufe == 2
+
+    ohne_kette, uhr = bot.Laufbericht(), Uhr()
+    bot.watch(cfg, 6, 300, sleeper=lambda s: setattr(uhr, "jetzt", uhr.jetzt + s),
+              clock=uhr, bericht=ohne_kette)
+    assert ohne_kette.nachfolger is None and ohne_kette.durchlaeufe == 1
+
+
+def test_main_watch_status_sieht_den_lauf(cli, monkeypatch):
+    """/status liest, was watch schreibt -- das muss derselbe Bericht sein."""
+    gesehen = watch_attrappe(monkeypatch)
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "102")
+    bot.main(["watch", "--befehle"])
+    bericht_ = gesehen.verdrahtung["bericht"]
+    assert bericht_.lauf == "102"
+    assert gesehen.verdrahtung["postfach"].bericht is bericht_
 
 
 def test_telegram_call_ein_versuch_wartet_nicht(monkeypatch):
