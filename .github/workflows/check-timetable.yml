@@ -79,7 +79,7 @@ jobs:
     timeout-minutes: 355
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Ohne diesen Schritt meldet die Laufkette Aenderungen doppelt.
       #
@@ -106,7 +106,7 @@ jobs:
           git reset --quiet --hard "origin/${{ github.ref_name }}"
           echo "Stand: $(git rev-parse --short HEAD)"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
