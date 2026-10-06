@@ -9,7 +9,25 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
-## 2.10.0 — 2026-10-06
+## 2.11.0 — 2026-10-06
+
+**`/today` schickt die Tagesübersicht.** Bis hierher sprach der Bot nur, jetzt
+hört er auch zu: In den Pausen zwischen zwei Prüfungen hält er eine
+Long-Polling-Anfrage an Telegram offen (`watch --befehle`) und beantwortet
+`/today` (oder `/heute`) nach Sekunden — mit dem heutigen Plan frisch aus
+WebUntis, Doppelstunden zusammengefasst, Ausfälle und Änderungen markiert.
+Jeder andere Befehl bekommt eine kurze Hilfe, und `/today` steht im
+Befehlsmenü.
+
+Geantwortet wird nur in den Chats aus `TELEGRAM_CHAT_ID`. Befehle älter als
+15 Minuten verfallen, damit nach einem Kettenabriss nicht die Antwort auf eine
+Frage vom Vorabend kommt. Den Prüftakt verschiebt das Postfach nicht. Klemmt es
+(Webhook gesetzt, zweiter Abholer, Netz weg), wird geschlafen wie bisher; nach
+fünf Fehlschlägen in Folge fragt es bis zum Ende des Laufs nicht mehr. Jede
+dieser Zusicherungen hat ihre Mutationsprobe. Ende-zu-Ende geprüft gegen einen
+lokalen Telegram-Nachbau: Antwort nur an den eingetragenen Chat, sofort
+quittiert, Wartezeit auf die Hundertstelsekunde gehalten.
+
 
 **Die Kette übersteht auch einen Lauf, der nie bis zum Ende kommt.**
 

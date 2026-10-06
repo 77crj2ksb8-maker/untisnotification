@@ -3858,8 +3858,10 @@ def watch_attrappe(monkeypatch):
     """Ersetzt watch und merkt sich, womit main() es aufruft."""
     gesehen = {}
 
-    def fake_watch(_cfg, m, i, n, anmelden=None):
-        gesehen.update(minutes=m, interval=i, night=n, anmelden=anmelden)
+    def fake_watch(_cfg, m, i, n, sleeper=None, anmelden=None):
+        postfach = isinstance(getattr(sleeper, "__self__", None), bot.Postfach)
+        gesehen.update(minutes=m, interval=i, night=n, anmelden=anmelden,
+                       befehle=postfach)
         return 0
 
     monkeypatch.setattr(bot, "watch", fake_watch)
@@ -3871,7 +3873,7 @@ def test_main_watch_reicht_parameter_durch(cli, monkeypatch):
     bot.main(["watch", "--minutes", "12", "--interval", "60",
               "--night-interval", "900"])
     assert gesehen == {"minutes": 12, "interval": 60, "night": 900,
-                       "anmelden": None}
+                       "anmelden": None, "befehle": False}
 
 
 def test_main_watch_standardwerte(cli, monkeypatch):
@@ -3883,7 +3885,13 @@ def test_main_watch_standardwerte(cli, monkeypatch):
     # --kette keine Anmeldung, selbst wenn ein GitHub-Zugang da ist: Ein
     # lokaler Lauf soll nie in die echte Kette eingreifen.
     assert gesehen == {"minutes": 330, "interval": 300, "night": None,
-                       "anmelden": None}
+                       "anmelden": None, "befehle": False}
+
+
+def test_main_watch_befehle_lauscht_in_den_pausen(cli, monkeypatch):
+    gesehen = watch_attrappe(monkeypatch)
+    assert bot.main(["watch", "--befehle"]) == 0
+    assert gesehen["befehle"] is True
 
 
 def test_main_watch_kette_meldet_ueber_github_an(cli, monkeypatch):
@@ -4812,6 +4820,15 @@ def test_dependabot_nur_fuer_die_actions():
     assert [u["package-ecosystem"] for u in konfig["updates"]] == ["github-actions"]
 
 
+def test_nur_die_ueberwachung_beantwortet_befehle():
+    """Zwei gleichzeitige getUpdates-Abholer verdraengen einander (HTTP 409).
+    --befehle gehoert deshalb genau an den watch-Aufruf der Kette."""
+    _, schritte = ketten_schritte()
+    befehle = [z for z in schritte["Ueberwachen"][1]["run"].splitlines()
+               if not z.strip().startswith("#") and "--befehle" in z]
+    assert len(befehle) == 1 and "python bot.py watch" in befehle[0]
+
+
 def test_wachhund_workflow_darf_neu_anwerfen():
     wachhund = workflow("watchdog.yml")
     assert wachhund["permissions"]["actions"] == "write"
@@ -4882,3 +4899,361 @@ def test_github_call_kaputtes_json_ist_github_error(monkeypatch):
                         GitHubAttrappe(KaputtesJson({"x": 1}, status=200)))
     with pytest.raises(bot.GitHubError, match="unlesbare Antwort"):
         bot.github_call(ZUGANG, "GET")
+
+
+# ===========================================================================
+#  Befehle aus Telegram: /today
+# ===========================================================================
+
+def test_tagesuebersicht_fasst_doppelstunden_zusammen():
+    stunden = [lesson(start="07:40", end="08:25", rooms=("R101",), uid=1),
+               lesson(start="08:30", end="09:15", rooms=("R101",), uid=2),
+               lesson(start="09:35", end="10:20", subjects=("D",), uid=3)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert "<b>📅 Montag, 14.09.</b>" in text
+    assert "<b>1./2.</b> 07:40–09:15 · <b>M</b> · R101" in text
+    assert "<b>3.</b> 09:35–10:20 · <b>D</b>" in text
+    assert "3 Stunden" in text
+
+
+def test_tagesuebersicht_drei_stunden_am_stueck():
+    stunden = [lesson(start=a, end=e, uid=i) for i, (a, e, _n)
+               in enumerate(RASTER[0][:3])]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert "<b>1.–3.</b> 07:40–10:20" in text
+
+
+def test_tagesuebersicht_freistunde_trennt():
+    """Mathe in der 1. und 3. Stunde ist keine Doppelstunde -- dazwischen
+    liegt eine Freistunde, die sonst aus der Uebersicht verschwaende."""
+    stunden = [lesson(start="07:40", end="08:25", uid=1),
+               lesson(start="09:35", end="10:20", uid=3)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert "<b>1.</b> 07:40–08:25" in text and "<b>3.</b> 09:35–10:20" in text
+    assert "1./3." not in text and "07:40–10:20" not in text
+
+
+def test_tagesuebersicht_ohne_raster_nur_uhrzeiten():
+    """Ohne Raster ist "lueckenlos" nicht erkennbar -- also wird nie
+    zusammengefasst, und es gibt keine Stundennummern."""
+    stunden = [lesson(start="07:40", end="08:25", uid=1),
+               lesson(start="08:30", end="09:15", uid=2)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14))
+    assert "▫️ 07:40–08:25 · <b>M</b>" in text
+    assert "▫️ 08:30–09:15 · <b>M</b>" in text
+    assert "1./2." not in text
+
+
+def test_tagesuebersicht_raumwechsel_trennt_die_doppelstunde():
+    """Sonst stuende nur der erste Raum da -- und man saesse in der zweiten
+    Stunde im falschen."""
+    stunden = [lesson(start="07:40", end="08:25", rooms=("R1",), uid=1),
+               lesson(start="08:30", end="09:15", rooms=("R2",), uid=2)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert "<b>1.</b> 07:40–08:25 · <b>M</b> · R1" in text
+    assert "<b>2.</b> 08:30–09:15 · <b>M</b> · R2" in text
+
+
+def test_tagesuebersicht_trennt_parallelkurse():
+    stunden = [lesson(start="07:40", end="08:25", subjects=("Sp",), group="A", uid=1),
+               lesson(start="08:30", end="09:15", subjects=("Sp",), group="B", uid=2)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert text.count("<b>Sp</b>") == 2
+
+
+def test_tagesuebersicht_markiert_ausfall_und_aenderung():
+    stunden = [lesson(start="07:40", end="08:25", status=CANCELLED,
+                      note="Lehrkraft erkrankt", uid=1),
+               lesson(start="08:30", end="09:15", subjects=("E",),
+                      status=bot.IRREGULAR, uid=2)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert "❌ <b>1.</b> 07:40–08:25 · <s>M</s> — entfällt" in text
+    assert "    <i>Lehrkraft erkrankt</i>" in text
+    assert "⚠️ <b>2.</b> 08:30–09:15 · <b>E</b> — geändert" in text
+    assert "2 Stunden · 1 entfällt · 1 geändert" in text
+
+
+def test_tagesuebersicht_escaped_html():
+    stunden = [lesson(subjects=(), note="Exkursion <Museum> & mehr", uid=1)]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert "Exkursion &lt;Museum&gt; &amp; mehr" in text
+    assert "<Museum>" not in text
+    # Ohne Fach ist der Infotext der Titel -- nicht noch einmal darunter.
+    assert text.count("Exkursion") == 1
+
+
+def test_tagesuebersicht_leerer_tag_und_fremde_tage():
+    morgen = [lesson(date=DI, uid=1)]
+    text = bot.tagesuebersicht(morgen, dt.date(2026, 9, 14), RASTER,
+                               dt.datetime(2026, 9, 14, 7, 5))
+    assert text == ("<b>📅 Montag, 14.09.</b>\nKeine Stunden im Plan.\n"
+                    "<i>Stand 07:05 Uhr</i>")
+
+
+def test_tagesuebersicht_einzahl_und_stand():
+    text = bot.tagesuebersicht([lesson()], dt.date(2026, 9, 14), RASTER,
+                               dt.datetime(2026, 9, 14, 7, 5))
+    assert text.endswith("<i>1 Stunde</i>\n<i>Stand 07:05 Uhr</i>")
+
+
+def test_tagesuebersicht_passt_durch_split():
+    stunden = [lesson(start=a, end=e, subjects=(f"F{i}",), note="x" * 200, uid=i)
+               for i, (a, e, _n) in enumerate(RASTER[0])]
+    text = bot.tagesuebersicht(stunden, dt.date(2026, 9, 14), RASTER)
+    assert bot.split(text) == [text]
+
+
+UNIX_JETZT = 1_800_000_000.0
+
+
+def update(nummer, text, chat=42, alter=5, art="message"):
+    return {"update_id": nummer,
+            art: {"message_id": nummer, "date": UNIX_JETZT - alter,
+                  "chat": {"id": chat, "type": "private"}, "text": text}}
+
+
+def test_befehle_aus_liest_today():
+    abholung = bot.befehle_aus([update(10, "/today")], ("42",), UNIX_JETZT)
+    assert abholung.befehle == (("42", "today"),)
+    assert abholung.offset == 11
+
+
+def test_befehle_aus_nur_aus_eingetragenen_chats():
+    """SICHERHEITSNETZ: Den Bot kann jeder Telegram-Nutzer finden und
+    anschreiben. Den Stundenplan abfragen duerfen trotzdem nur die Chats aus
+    TELEGRAM_CHAT_ID -- sonst laege er fuer jeden Fremden offen.
+
+    Mutationstest: in befehle_aus die Pruefung "chat not in erlaubt"
+    streichen -> dieser Test muss rot werden.
+    """
+    abholung = bot.befehle_aus([update(10, "/today", chat=999),
+                                update(11, "/today", chat=-100123)],
+                               ("42", "-100123"), UNIX_JETZT)
+    assert abholung.befehle == (("-100123", "today"),)
+    assert abholung.fremde == ("999",)
+    assert abholung.offset == 12            # auch ueber das ignorierte hinweg
+
+
+def test_befehle_aus_ignoriert_alte_befehle():
+    """Ein "/today" von gestern Abend, abgeholt nach einem Kettenabriss,
+    bekaeme sonst heute die falsche Antwort. Quittiert wird es trotzdem."""
+    abholung = bot.befehle_aus(
+        [update(10, "/today", alter=bot.BEFEHL_MAX_ALTER + 1)], ("42",), UNIX_JETZT)
+    assert abholung.befehle == () and abholung.offset == 11
+
+    abholung = bot.befehle_aus(
+        [update(11, "/today", alter=bot.BEFEHL_MAX_ALTER - 1)], ("42",), UNIX_JETZT)
+    assert abholung.befehle == (("42", "today"),)
+
+
+@pytest.mark.parametrize("text,befehl", [
+    ("/today", "today"), ("/TODAY", "today"), ("/today@MeinUntisBot", "today"),
+    ("/today bitte", "today"), ("/heute", "today"), ("/start", "start"),
+    ("/", "")])
+def test_befehle_aus_schreibweisen(text, befehl):
+    abholung = bot.befehle_aus([update(1, text)], ("42",), UNIX_JETZT)
+    assert abholung.befehle == (("42", befehl),)
+
+
+def test_befehle_aus_ignoriert_nicht_befehle():
+    updates = [update(1, "hallo"), update(2, "/today", art="edited_message"),
+               {"update_id": 3, "message": {"chat": {"id": 42}, "date": UNIX_JETZT}},
+               {"kein": "update"}, update(4, "/today")]
+    abholung = bot.befehle_aus(updates, ("42",), UNIX_JETZT)
+    assert abholung.befehle == (("42", "today"),)
+    assert abholung.offset == 5
+
+
+def test_befehle_aus_doppelt_getippt_einmal_beantwortet():
+    abholung = bot.befehle_aus([update(1, "/today"), update(2, "/heute")],
+                               ("42",), UNIX_JETZT)
+    assert abholung.befehle == (("42", "today"),)
+
+
+class TelegramWelt:
+    """Ersetzt telegram_call fuers Postfach, mit stellbarer Uhr."""
+
+    def __init__(self, *abholungen, fehler=None):
+        self.abholungen = list(abholungen)
+        self.fehler = fehler
+        self.uhr = Uhr()
+        self.aufrufe = []
+        self.gesendet = []
+        self.geschlafen = []
+
+    def __call__(self, _token, method, payload, timeout=None, attempts=None):
+        self.aufrufe.append((method, dict(payload)))
+        if method == "sendMessage":
+            if self.fehler and payload["chat_id"] in self.fehler:
+                raise bot.TelegramError("sendMessage -> 502")
+            self.gesendet.append((payload["chat_id"], payload["text"]))
+            return {}
+        if method == "setMyCommands":
+            return True
+        if method == "getUpdates":
+            if self.fehler == "getUpdates":
+                raise bot.TelegramError("getUpdates -> 409: Conflict")
+            if payload.get("timeout"):
+                self.uhr.jetzt += 1           # eine Abholung dauert
+                if not self.abholungen:
+                    self.uhr.jetzt += payload["timeout"] - 1
+            return self.abholungen.pop(0) if self.abholungen else []
+        raise AssertionError(method)
+
+    def schlafe(self, sekunden):
+        self.geschlafen.append(sekunden)
+        self.uhr.jetzt += sekunden
+
+    def postfach(self, cfg):
+        return bot.Postfach(cfg, uhr=self.uhr, wanduhr=lambda: UNIX_JETZT,
+                            schlaf=self.schlafe)
+
+
+@pytest.fixture
+def telegram_welt(monkeypatch):
+    def bauen(*abholungen, fehler=None):
+        welt = TelegramWelt(*abholungen, fehler=fehler)
+        monkeypatch.setattr(bot, "telegram_call", welt)
+        monkeypatch.setattr(bot, "tagesuebersicht_holen",
+                            lambda _cfg: "<b>📅 Montag</b>")
+        return welt
+    return bauen
+
+
+def test_postfach_beantwortet_today_im_richtigen_chat(cfg, telegram_welt):
+    welt = telegram_welt([update(7, "/today")])
+    mehrere = dataclasses.replace(cfg, telegram_chats=("42", "77"))
+    welt.postfach(mehrere).warten(300)
+    assert welt.gesendet == [("42", "<b>📅 Montag</b>")]
+    # Sofort quittiert, damit ein Nachfolger nicht noch einmal antwortet.
+    assert ("getUpdates", {"offset": 8, "timeout": 0}) in welt.aufrufe
+
+
+def test_postfach_beantwortet_unbekanntes_mit_hilfe(cfg, telegram_welt):
+    welt = telegram_welt([update(7, "/start")])
+    welt.postfach(cfg).warten(120)
+    ((chat, text),) = welt.gesendet
+    assert chat == "42" and "/today" in text
+
+
+def test_postfach_haelt_die_wartezeit_ein(cfg, telegram_welt):
+    """SICHERHEITSNETZ: Das Postfach ersetzt den Schlaf zwischen zwei
+    Pruefungen -- es darf den Takt nicht verschieben. Kehrte es zu frueh
+    zurueck, fragte der Bot WebUntis oefter als gewollt; zu spaet, und eine
+    Aenderung kaeme spaeter an.
+
+    Mutationstest: in Postfach.warten nach dem ersten _abholen() mit return
+    aussteigen -> dieser Test muss rot werden.
+    """
+    welt = telegram_welt([update(7, "/today")], [], [])
+    welt.postfach(cfg).warten(1800)
+    assert welt.uhr.jetzt == pytest.approx(1800)
+    # Lange Abholungen statt vieler kurzer: hoechstens eine je LANGPOLL.
+    abholungen = [a for a in welt.aufrufe
+                  if a[0] == "getUpdates" and a[1].get("timeout")]
+    assert len(abholungen) <= 1800 / bot.LANGPOLL + 3
+    assert all(a[1]["timeout"] <= bot.LANGPOLL for a in abholungen)
+
+
+def test_postfach_unter_einer_sekunde_keine_anfrage(cfg, telegram_welt):
+    welt = telegram_welt()
+    welt.postfach(cfg).warten(0.5)
+    assert welt.aufrufe == [] and welt.geschlafen == [0.5]
+
+
+def test_postfach_stoert_die_ueberwachung_nie(cfg, telegram_welt):
+    """SICHERHEITSNETZ: Klemmt das Postfach (Webhook gesetzt, zweiter Abholer,
+    Netz weg), wird geschlafen wie frueher -- ohne Ausnahme, ohne Schleife
+    aus Fehlanfragen, und nach POSTFACH_FEHLERGRENZE Fehlern gar nicht mehr
+    gefragt.
+
+    Mutationstest: in Postfach.warten das try/except um _abholen()
+    entfernen -> dieser Test muss rot werden.
+    """
+    welt = telegram_welt(fehler="getUpdates")
+    postfach = welt.postfach(cfg)
+    postfach.warten(1800)
+    postfach.warten(1800)
+    assert welt.uhr.jetzt == pytest.approx(3600)
+    fehlversuche = [a for a in welt.aufrufe if a[0] == "getUpdates"]
+    assert len(fehlversuche) == bot.POSTFACH_FEHLERGRENZE
+    assert postfach.aktiv is False
+    # Zwischen den Fehlversuchen Pausen: Eine kurze Stoerung (zweiter
+    # Abholer waehrend der Uebergabe, Netz-Wackler) soll das Postfach nicht
+    # in Sekunden fuer den ganzen Lauf abschalten.
+    assert welt.geschlafen[:bot.POSTFACH_FEHLERGRENZE - 1] == [30.0] * (
+        bot.POSTFACH_FEHLERGRENZE - 1)
+
+
+def test_watch_mit_kaputtem_postfach_ueberwacht_weiter(cfg, monkeypatch,
+                                                      telegram_welt):
+    welt = telegram_welt(fehler="getUpdates")
+    laeufe = []
+
+    def fake_check(_cfg):
+        laeufe.append(1)
+        welt.uhr.jetzt += 3
+        return bot.Result(bot.OK)
+
+    monkeypatch.setattr(bot, "check_once", fake_check)
+    code = bot.watch(cfg, 55, 300, sleeper=welt.postfach(cfg).warten,
+                     clock=welt.uhr)
+    assert code == 0 and len(laeufe) == 11
+
+
+def test_postfach_ein_fehlgeschlagener_versand_kostet_nicht_den_naechsten(
+        cfg, telegram_welt):
+    welt = telegram_welt([update(7, "/today", chat=42),
+                          update(8, "/today", chat=77)], fehler={"42"})
+    welt.postfach(dataclasses.replace(cfg, telegram_chats=("42", "77"))).warten(60)
+    assert welt.gesendet == [("77", "<b>📅 Montag</b>")]
+
+
+def test_postfach_setzt_das_befehlsmenue_einmal(cfg, telegram_welt):
+    welt = telegram_welt()
+    postfach = welt.postfach(cfg)
+    postfach.warten(120)
+    postfach.warten(120)
+    menues = [a for a in welt.aufrufe if a[0] == "setMyCommands"]
+    assert menues == [("setMyCommands", {"commands": [
+        {"command": "today", "description": "Stundenplan von heute"}]})]
+
+
+def test_tagesuebersicht_holen_frisch_aus_webuntis(cfg, monkeypatch):
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 14, 6, 50))
+    monkeypatch.setattr(bot, "Untis", FakeUntis(
+        [lesson(rooms=("R1",)), lesson(date=DI, uid=2)], periods=RASTER))
+    text = bot.tagesuebersicht_holen(cfg)
+    assert "<b>1.</b> 07:40–08:25 · <b>M</b> · R1" in text
+    assert "1 Stunde" in text and "Stand 06:50 Uhr" in text
+
+
+def test_tagesuebersicht_holen_ferien(cfg, monkeypatch):
+    monkeypatch.setattr(bot, "now_local",
+                        lambda _tz: dt.datetime(2026, 9, 19, 9, 0))
+    monkeypatch.setattr(bot, "Untis",
+                        FakeUntis(fehler=bot.NothingToDo("Wochenende")))
+    assert "Keine Stunden im Plan." in bot.tagesuebersicht_holen(cfg)
+
+
+def test_tagesuebersicht_holen_webuntis_weg(cfg, monkeypatch):
+    monkeypatch.setattr(bot, "Untis",
+                        FakeUntis(fehler=bot.UntisError("Server weg")))
+    assert "WebUntis antwortet gerade nicht" in bot.tagesuebersicht_holen(cfg)
+
+
+def test_telegram_call_ein_versuch_wartet_nicht(monkeypatch):
+    """Das Postfach fragt mit attempts=1: kein Backoff-Schlaf, eine Anfrage."""
+    anfragen, geschlafen = [], []
+
+    def fake_post(url, json=None, timeout=None):
+        anfragen.append(timeout)
+        raise bot.requests.exceptions.ConnectionError("weg")
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    monkeypatch.setattr(bot.time, "sleep", geschlafen.append)
+    with pytest.raises(bot.TelegramError):
+        bot.telegram_call("1:A", "getUpdates", {}, timeout=65, attempts=1)
+    assert anfragen == [65] and geschlafen == []
+

@@ -20,6 +20,7 @@ Aufrufe:
     python bot.py check              einmal pruefen
     python bot.py watch              5,5 Stunden lang im Takt pruefen
     python bot.py watch --kette      ... und den naechsten Lauf anmelden
+    python bot.py watch --befehle    ... und in den Pausen /today beantworten
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py alert "..."        Stoermeldung senden
@@ -62,7 +63,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.10.0"
+VERSION = "2.11.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -1326,6 +1327,106 @@ def render_summary(changes: Sequence[Change], bulk_note: str = "") -> str:
     return "\n".join(lines)
 
 
+#: Symbol je Status in der Tagesuebersicht. Regulaere Stunden bekommen ein
+#: unauffaelliges Zeichen: Auffallen sollen die Ausnahmen.
+TAG_ICONS = {REGULAR: "▫️", CANCELLED: "❌", IRREGULAR: "⚠️"}
+
+
+def _tagesbloecke(lessons: Sequence[Lesson],
+                  periods: Periods) -> list[list[Lesson]]:
+    """Fasst lueckenlos aufeinanderfolgende, gleiche Stunden zusammen.
+
+    Dieselbe Regel wie bei den Aenderungsmeldungen (group_doppelstunden):
+    "lueckenlos" heisst im Raster direkt hintereinander, und ohne Raster
+    wird nie zusammengefasst. Gleich heisst: alles, was in der Zeile steht
+    -- sonst verschwaende etwa ein Raumwechsel zur zweiten Stunde in einer
+    Doppelstunde, die es so nicht gibt. Die Kursgruppe gehoert dazu, damit
+    Parallelkurse getrennte Zeilen bleiben.
+    """
+    ketten: dict[tuple, list[list[Lesson]]] = {}
+    for lesson in sorted(lessons, key=chronological):
+        art = (lesson.title, lesson.group, lesson.rooms, lesson.teachers,
+               lesson.status, lesson.note)
+        bisher = ketten.setdefault(art, [])
+        if bisher:
+            ia = period_index(bisher[-1][-1], periods)
+            ib = period_index(lesson, periods)
+            if ia is not None and ib is not None and ib == ia + 1:
+                bisher[-1].append(lesson)
+                continue
+        bisher.append([lesson])
+    bloecke = [block for liste in ketten.values() for block in liste]
+    bloecke.sort(key=lambda block: chronological(block[0]))
+    return bloecke
+
+
+def tagesuebersicht(lessons: Sequence[Lesson], tag: dt.date,
+                    periods: Periods | None = None,
+                    stand: dt.datetime | None = None) -> str:
+    """Der Stundenplan eines Tages als Telegram-Nachricht (Befehl /today).
+
+    Anders als render() zeigt sie den ganzen Tag, nicht nur Aenderungen --
+    und deshalb immer die Uhrzeit, auch wo das Raster eine Nummer kennt:
+    Wer morgens nachsieht, will wissen, wann er wo sein muss.
+    """
+    periods = periods or {}
+    datum = tag.isoformat()
+    heute = [lesson for lesson in lessons if lesson.date == datum]
+    kopf = f"<b>📅 {esc(day_header(datum))}</b>"
+    fuss = f"<i>Stand {stand:%H:%M} Uhr</i>" if stand else ""
+
+    if not heute:
+        return "\n".join(z for z in (kopf, "Keine Stunden im Plan.", fuss) if z)
+
+    zeilen = [kopf, ""]
+    for block in _tagesbloecke(heute, periods):
+        erste, letzte = block[0], block[-1]
+        # Bloecke entstehen nur aus Stunden mit Rasterplatz; fehlt der
+        # Name, ist es eine Einzelstunde quer zum Raster -- dann nur die
+        # Uhrzeit.
+        namen = [period_name(lesson, periods) for lesson in block]
+        if None in namen:
+            label = ""
+        elif len(block) == 1:
+            label = f"{namen[0]}."
+        elif len(block) == 2:
+            label = f"{namen[0]}./{namen[1]}."
+        else:
+            label = f"{namen[0]}.–{namen[-1]}."
+
+        titel = esc(erste.title)
+        titel = f"<s>{titel}</s>" if erste.status == CANCELLED else f"<b>{titel}</b>"
+        teile = [titel]
+        if erste.rooms:
+            teile.append(esc(_join(erste.rooms)))
+        if erste.teachers:
+            teile.append(esc(_join(erste.teachers)))
+        zusatz = {CANCELLED: " — entfällt", IRREGULAR: " — geändert"}.get(
+            erste.status, "")
+
+        vorne = f"{TAG_ICONS.get(erste.status, '▫️')} "
+        if label:
+            vorne += f"<b>{esc(label)}</b> "
+        zeilen.append(f"{vorne}{erste.start}–{letzte.end} · "
+                      f"{' · '.join(teile)}{zusatz}")
+        # Ohne Fach ist der Infotext schon der Titel (Lesson.title) --
+        # zweimal untereinander saehe nach einem Fehler aus.
+        if erste.note and erste.note != erste.title:
+            zeilen.append(f"    <i>{esc(erste.note)}</i>")
+
+    ausfall = sum(1 for lesson in heute if lesson.status == CANCELLED)
+    geaendert = sum(1 for lesson in heute if lesson.status == IRREGULAR)
+    zahlen = [f"{len(heute)} Stunde{'' if len(heute) == 1 else 'n'}"]
+    if ausfall:
+        zahlen.append(f"{ausfall} entfällt" if ausfall == 1
+                      else f"{ausfall} entfallen")
+    if geaendert:
+        zahlen.append(f"{geaendert} geändert")
+    zeilen.append("")
+    zeilen.append(f"<i>{' · '.join(zahlen)}</i>" + (f"\n{fuss}" if fuss else ""))
+    return "\n".join(zeilen)
+
+
 #: Telegrams harte Grenze. Steht hier, obwohl der Code sie nie liest:
 #: Sie ist die Begruendung fuer SPLIT_AT, und ein Test haelt den Abstand
 #: fest. Ohne sie waere die 3500 eine Zahl ohne Herkunft.
@@ -1504,14 +1605,20 @@ def scrub(text: str, token: str) -> str:
     return text.replace(token, "<TOKEN>") if token else text
 
 
-def telegram_call(token: str, method: str, payload: dict) -> dict:
-    """Ruft die Telegram-API auf, mit Wiederholung bei Stoerungen."""
+def telegram_call(token: str, method: str, payload: dict,
+                  timeout: float = TIMEOUT, attempts: int = ATTEMPTS) -> dict:
+    """Ruft die Telegram-API auf, mit Wiederholung bei Stoerungen.
+
+    timeout und attempts nur fuers Postfach: Ein getUpdates haelt die
+    Verbindung bewusst bis zu LANGPOLL Sekunden offen, und wiederholt wird
+    dort ohnehin -- mit der naechsten Abholung.
+    """
     url = f"{API}/bot{token}/{method}"
     last: Exception | None = None
 
-    for attempt in range(1, ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
-            response = requests.post(url, json=payload, timeout=TIMEOUT)
+            response = requests.post(url, json=payload, timeout=timeout)
             data = response.json()
         except requests.RequestException as exc:
             last = TelegramError(
@@ -1535,17 +1642,17 @@ def telegram_call(token: str, method: str, payload: dict) -> dict:
 
             last = TelegramError(message)
             wait = (data.get("parameters") or {}).get("retry_after")
-            _backoff(attempt, method, message, wait)
+            _backoff(attempt, method, message, wait, attempts)
             continue
 
-        _backoff(attempt, method, str(last))
+        _backoff(attempt, method, str(last), attempts=attempts)
 
-    raise last or TelegramError(f"{method} nach {ATTEMPTS} Versuchen gescheitert")
+    raise last or TelegramError(f"{method} nach {attempts} Versuchen gescheitert")
 
 
 def _backoff(attempt: int, method: str, why: str,
-             override: float | None = None) -> None:
-    if attempt >= ATTEMPTS:
+             override: float | None = None, attempts: int = ATTEMPTS) -> None:
+    if attempt >= attempts:
         return
     # Telegram nennt bei Flood-Control durchaus dreistellige Sekundenwerte.
     # Ungebremst blockierte das den 5-Minuten-Takt und liefe gegen das
@@ -1556,7 +1663,7 @@ def _backoff(attempt: int, method: str, why: str,
     except (TypeError, ValueError):
         wait = 2 ** (attempt - 1)
     log.warning("%s Versuch %d/%d fehlgeschlagen (%s) -- erneut in %.0fs",
-                method, attempt, ATTEMPTS, why[:120], wait)
+                method, attempt, attempts, why[:120], wait)
     time.sleep(wait)
 
 
@@ -2320,6 +2427,216 @@ def lebenszeichen(url: str) -> bool:
 
 
 # ===========================================================================
+#  Befehle aus Telegram  -- /today
+# ===========================================================================
+#
+# Bis 2.10 sprach der Bot nur, er hoerte nie zu. Jetzt lauscht er in der
+# Wartezeit zwischen zwei Pruefungen auf Befehle: per Long-Polling
+# (getUpdates mit timeout). Eine Antwort kommt so nach Sekunden statt erst
+# beim naechsten 5- oder 30-Minuten-Takt -- und ohne eigenen Server, den
+# ein Webhook braeuchte.
+
+#: So lange haelt Telegram eine getUpdates-Anfrage offen, wenn nichts kommt.
+LANGPOLL = 50
+
+#: Aelter darf ein Befehl nicht sein, um noch beantwortet zu werden. Stand
+#: die Kette eine Weile, holt der naechste Lauf alles Liegengebliebene ab --
+#: eine Tagesuebersicht auf ein "/today" von gestern Abend verwirrte nur.
+BEFEHL_MAX_ALTER = 15 * 60                    # Sekunden
+
+#: Nach so vielen Fehlschlaegen in Folge schweigt das Postfach fuer den
+#: Rest des Laufs. Dann ist etwas dauerhaft falsch (Webhook gesetzt, Token
+#: ungueltig), und jede weitere Anfrage schriebe nur dieselbe Warnung.
+POSTFACH_FEHLERGRENZE = 5
+
+#: Das Befehlsmenue in Telegram (setMyCommands): Befehl -> Beschreibung.
+BEFEHLE = {"today": "Stundenplan von heute"}
+
+#: Weitere Schreibweisen fuer denselben Befehl.
+BEFEHL_ALIAS = {"heute": "today"}
+
+HILFE = ("Ich melde Änderungen am Stundenplan von selbst.\n"
+         "/today – Stundenplan von heute")
+
+
+@dataclass(frozen=True)
+class Abholung:
+    """Was eine getUpdates-Antwort fuer den Bot bedeutet."""
+
+    befehle: tuple[tuple[str, str], ...]      # (Chat, Befehl)
+    offset: int | None                        # fuer die naechste Abholung
+    fremde: tuple[str, ...] = ()              # Chats, die nicht eingetragen sind
+
+
+def befehle_aus(updates: Sequence[Any], chats: Iterable[str],
+                jetzt: float) -> Abholung:
+    """Liest die Befehle aus einer getUpdates-Antwort. Rein.
+
+    Der offset rueckt ueber JEDES Update hinweg, auch ueber ignorierte --
+    sonst kaeme ein ignoriertes bei jeder Abholung wieder.
+
+    Beantwortet wird nur, was aus einem der eingetragenen Chats kommt: Den
+    Bot kann jeder Telegram-Nutzer finden und anschreiben, den Stundenplan
+    soll er trotzdem nicht abfragen koennen. Und nur Frisches, siehe
+    BEFEHL_MAX_ALTER. Je Chat jeder Befehl hoechstens einmal pro Abholung:
+    Zweimal getippt heisst nicht zweimal gewollt.
+    """
+    erlaubt = {str(chat) for chat in chats}
+    befehle: list[tuple[str, str]] = []
+    fremde: list[str] = []
+    offset: int | None = None
+    for update in updates:
+        try:
+            offset = max(offset or 0, int(update["update_id"]) + 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+        nachricht = update.get("message")
+        if not isinstance(nachricht, dict):
+            continue                          # bearbeitet, Kanal, Beitritt ...
+        text = nachricht.get("text")
+        if not isinstance(text, str) or not text.startswith("/"):
+            continue                          # Plaudern ist kein Befehl
+        chat = str((nachricht.get("chat") or {}).get("id", ""))
+        if chat not in erlaubt:
+            fremde.append(chat)
+            continue
+        try:
+            alter = jetzt - float(nachricht.get("date"))
+        except (TypeError, ValueError):
+            continue
+        if alter > BEFEHL_MAX_ALTER:
+            continue
+        # "/today@MeinBot bitte" -> "today"
+        worte = text[1:].split()
+        befehl = worte[0].split("@")[0].lower() if worte else ""
+        befehl = BEFEHL_ALIAS.get(befehl, befehl)
+        if (chat, befehl) not in befehle:
+            befehle.append((chat, befehl))
+    return Abholung(tuple(befehle), offset, tuple(fremde))
+
+
+def tagesuebersicht_holen(cfg: Config) -> str:
+    """Der heutige Plan, frisch aus WebUntis -- nicht aus state.json.
+
+    Der gespeicherte Zustand ist bis zu einen Takt alt und bleibt bei einer
+    gemerkten Ausnahmelage absichtlich stehen. Auf eine Frage gehoert der
+    Plan, wie er jetzt ist.
+    """
+    jetzt = now_local(cfg.timezone)
+    heute = jetzt.date()
+    try:
+        with Untis(cfg) as untis:
+            try:
+                lessons = untis.timetable(heute, heute)
+            except NothingToDo:
+                lessons = []              # Wochenende, Ferien
+            periods = untis.timegrid()
+    except UntisError as exc:
+        log.warning("Tagesuebersicht nicht abrufbar: %s", exc)
+        return ("WebUntis antwortet gerade nicht — versuch es in ein paar "
+                "Minuten noch einmal.")
+    return tagesuebersicht(lessons, heute, periods, jetzt)
+
+
+class Postfach:
+    """Lauscht in der Wartezeit von watch() auf Befehle und beantwortet sie.
+
+    warten() ersetzt time.sleep als sleeper von watch(): Es kehrt nach der
+    verlangten Zeit zurueck und haelt waehrenddessen getUpdates offen. Den
+    Takt der Ueberwachung aendert das nicht.
+
+    Wirft nie. watch() faengt nur die Fehler von check_once ab, und das
+    Postfach ist Nebensache neben der Ueberwachung: Klemmt es, wird
+    geschlafen wie bisher.
+    """
+
+    def __init__(self, cfg: Config,
+                 uhr: Callable[[], float] = time.monotonic,
+                 wanduhr: Callable[[], float] = time.time,
+                 schlaf: Callable[[float], None] = time.sleep) -> None:
+        self.cfg = cfg
+        self.uhr, self.wanduhr, self.schlaf = uhr, wanduhr, schlaf
+        self.offset: int | None = None
+        self.fehler = 0
+        self.aktiv = True
+        self.menue = False
+
+    def warten(self, sekunden: float) -> None:
+        ende = self.uhr() + sekunden
+        while (rest := ende - self.uhr()) > 0:
+            # Unter einer Sekunde lohnt keine Anfrage -- und timeout=0
+            # kehrte sofort zurueck: eine Schleife aus Leeranfragen.
+            if not self.aktiv or rest < 1:
+                self.schlaf(rest)
+                return
+            try:
+                self._abholen(rest)
+            except Exception as exc:
+                self.fehler += 1
+                log.warning("Postfach: %s", str(exc).splitlines()[0])
+                if self.fehler >= POSTFACH_FEHLERGRENZE:
+                    log.warning("Postfach: %d Fehlschlaege in Folge -- bis "
+                                "zum Ende des Laufs keine Befehle mehr",
+                                self.fehler)
+                    self.aktiv = False
+                    continue
+                # Nicht sofort erneut: Ein Fehler kehrt meist ohne Wartezeit
+                # zurueck, die Schleife drehte sich sonst im Kreis.
+                self.schlaf(min(rest, 30.0))
+            else:
+                self.fehler = 0
+
+    def _abholen(self, rest: float) -> None:
+        if not self.menue:
+            self._menue_setzen()
+        warte = min(int(rest), LANGPOLL)
+        payload: dict[str, Any] = {"timeout": warte,
+                                   "allowed_updates": ["message"]}
+        if self.offset is not None:
+            payload["offset"] = self.offset
+        updates = telegram_call(self.cfg.telegram_token, "getUpdates", payload,
+                                timeout=warte + 15, attempts=1)
+        abholung = befehle_aus(updates if isinstance(updates, list) else [],
+                               self.cfg.telegram_chats, self.wanduhr())
+        if abholung.offset is not None:
+            self.offset = abholung.offset
+        # Ohne die Chat-ID: Die Lauf-Logs eines oeffentlichen Repos liest
+        # jeder, und die ID eines Fremden gehoert da nicht hinein.
+        if abholung.fremde:
+            log.info("%d Befehl(e) aus nicht eingetragenen Chats ignoriert",
+                     len(abholung.fremde))
+        for chat, befehl in abholung.befehle:
+            self._antworten(chat, befehl)
+        if abholung.befehle:
+            # Sofort quittieren: Endet der Lauf vor der naechsten Abholung,
+            # bekaeme der Nachfolger dieselben Befehle noch einmal.
+            telegram_call(self.cfg.telegram_token, "getUpdates",
+                          {"offset": self.offset, "timeout": 0}, attempts=1)
+
+    def _antworten(self, chat: str, befehl: str) -> None:
+        try:
+            text = tagesuebersicht_holen(self.cfg) if befehl == "today" else HILFE
+            for teil in split(text):
+                _send_chunk(self.cfg, chat, teil, silent=False)
+        except Exception as exc:
+            log.warning("Antwort auf /%s fehlgeschlagen: %s", befehl,
+                        str(exc).splitlines()[0])
+            return
+        log.info("Befehl /%s beantwortet", befehl)
+
+    def _menue_setzen(self) -> None:
+        """Traegt die Befehle ins Telegram-Menue ein -- einmal je Lauf."""
+        self.menue = True
+        try:
+            telegram_call(self.cfg.telegram_token, "setMyCommands",
+                          {"commands": [{"command": k, "description": v}
+                                        for k, v in BEFEHLE.items()]},
+                          attempts=1)
+        except TelegramError as exc:
+            log.info("Befehlsmenue nicht gesetzt: %s", str(exc).splitlines()[0])
+
+
+# ===========================================================================
 #  Ablauf
 # ===========================================================================
 
@@ -2883,6 +3200,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_watch.add_argument("--kette", action="store_true",
                          help="nach 20 Minuten den naechsten Lauf anmelden "
                               "(nur in GitHub Actions)")
+    p_watch.add_argument("--befehle", action="store_true",
+                         help="in den Pausen Telegram-Befehle wie /today "
+                              "beantworten")
 
     sub.add_parser("selftest", help="Zugangsdaten einzeln pruefen")
     sub.add_parser("testmessage", help="Beispielnachricht im aktuellen Format senden")
@@ -2933,7 +3253,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "show":
         return show(cfg, args.days)
     if command == "watch":
+        # Postfach nur auf Wunsch: Zwei gleichzeitige getUpdates-Abholungen
+        # verdraengen einander (HTTP 409). Ein lokaler watch neben der
+        # laufenden Kette soll ihr die Befehle nicht wegschnappen.
+        postfach = Postfach(cfg) if args.befehle else None
         return watch(cfg, args.minutes, args.interval, args.night_interval,
+                     sleeper=postfach.warten if postfach else time.sleep,
                      anmelden=kette_aus_umgebung() if args.kette else None)
 
     result = check_once(cfg, dry_run=args.dry_run)

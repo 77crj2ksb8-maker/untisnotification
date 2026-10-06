@@ -153,9 +153,13 @@ jobs:
               # Lauf statt an seinem Ende, damit der Nachfolger auch dann
               # uebernimmt, wenn dieser Lauf nie bis zum Ende kommt.
               # Sturmschutz und Fehlerverhalten: nachfolger_faellig in bot.py.
+              #
+              # --befehle: In den Pausen zwischen zwei Pruefungen beantwortet
+              # der Bot Telegram-Befehle wie /today. Nur hier, sonst stuenden
+              # zwei Abholer im Wettstreit um dieselben Nachrichten.
               git config user.name  "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
-              python bot.py watch --kette \
+              python bot.py watch --kette --befehle \
                 --minutes "${{ github.event.inputs.minuten || '330' }}" \
                 --interval 300 \
                 --night-interval 1800

@@ -34,6 +34,9 @@ Montag, 14.09. (heute)
 * **Bremse gegen Fehlalarme** — liefert WebUntis wegen Wartung plötzlich viel
   weniger Stunden, meldet der Bot nicht „alles entfällt", sondern wartet auf
   Bestätigung.
+* **Tagesübersicht auf Zuruf** — `/today` (oder `/heute`) im Chat schickt den
+  heutigen Stundenplan, frisch aus WebUntis: Doppelstunden zusammengefasst,
+  Ausfälle und Änderungen markiert. Antwortet nur in den eingetragenen Chats.
 * **Dauerbetrieb rund um die Uhr** — alle 5 Minuten in der Schulzeit, alle 30
   Minuten nachts und am Wochenende. Die Laufkette trägt sich selbst, und steht
   sie doch einmal, wirft der Wachhund sie bei seiner nächsten Runde wieder an.
@@ -191,7 +194,7 @@ besser sein eigenes Repo ein.
 |---|---|
 | `python bot.py check` | einmal prüfen, melden, Zustand sichern |
 | `python bot.py check --dry-run` | prüfen und die Nachricht ausgeben, ohne zu senden oder zu speichern |
-| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst |
+| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst. `--befehle` beantwortet in den Pausen `/today` |
 | `python bot.py selftest` | jeden Zugang einzeln durchtesten und sagen, was klemmt |
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py alert "..."` | Störmeldung senden (`--quelle` für den Link zum Lauf) |
@@ -199,6 +202,18 @@ besser sein eigenes Repo ein.
 | `python bot.py wachhund` | nachsehen, ob die Laufkette lebt, und sie notfalls anwerfen — nur in GitHub Actions |
 
 `--log DEBUG` und `--version` gibt es zu jedem Befehl.
+
+### In Telegram
+
+| Nachricht an den Bot | Antwort |
+|---|---|
+| `/today` oder `/heute` | der heutige Stundenplan: Zeiten, Fächer, Räume, Ausfälle und Änderungen markiert |
+| jeder andere `/`-Befehl | kurze Hilfe |
+
+`/today` steht nach dem ersten Lauf auch im Befehlsmenü von Telegram. Der Bot
+antwortet nur in den Chats aus `TELEGRAM_CHAT_ID` — finden und anschreiben kann
+ihn jeder, deinen Stundenplan abfragen nicht. Wie schnell die Antwort kommt,
+steht unter [Wie es läuft](#wie-es-läuft).
 
 ## Einstellungen
 
@@ -313,6 +328,13 @@ alle 5 Minuten werktags zwischen 6 und 19 Uhr, sonst alle 30 Minuten. Nachts im
 Fünfminutentakt zu fragen wäre sinnlose Last: Jede Abfrage ist eine
 vollständige WebUntis-Anmeldung. Verpasst wird dabei nichts — was um 2 Uhr
 nachts eingetragen wird, steht spätestens eine halbe Stunde später im Chat.
+
+Die Pausen zwischen zwei Prüfungen verschläft der Bot nicht: Er hält eine
+Anfrage an Telegram offen (Long-Polling) und beantwortet `/today`, sobald es
+eintrifft — nach Sekunden. Nur während einer laufenden Prüfung oder einer
+Übergabe zwischen zwei Läufen dauert es einen Moment länger. Steht die Kette,
+bleibt der Befehl liegen; nach 15 Minuten verfällt er, damit nicht am nächsten
+Morgen die Antwort auf eine Frage vom Vorabend kommt.
 
 In der Lauf-Liste tauchen regelmäßig **abgebrochene** Einträge auf. Das ist kein
 Fehler, sondern genau der Mechanismus: wartende Läufe, die von einem neueren
@@ -535,6 +557,9 @@ vollständig bleibt:
 | ein kaputtes Lebenszeichen beendet nie die Überwachung | `test_watch_ueberlebt_ein_kaputtes_lebenszeichen` |
 | die Lebenszeichen-Adresse steht in keinem Log | `test_lebenszeichen_verraet_die_adresse_nicht` |
 | kein Geheimnis in der Darstellung der Konfiguration | `test_config_darstellung_verraet_keine_geheimnisse` |
+| `/today` beantwortet nur die eingetragenen Chats | `test_befehle_aus_nur_aus_eingetragenen_chats` |
+| das Postfach verschiebt den Prüftakt nicht | `test_postfach_haelt_die_wartezeit_ein` |
+| ein klemmendes Postfach stört die Überwachung nie | `test_postfach_stoert_die_ueberwachung_nie` |
 
 Der `run`-Block-Wächter ist aus Schaden entstanden: In 2.3.0 rutschte beim Einfügen des
 Meldeschritts das schließende `fi` des Überwachungsschritts in den neuen
@@ -555,8 +580,12 @@ wiederholt was ohnehin dasteht, kann weg.
   allein — nach langen Ferien einmal „Enable workflow" klicken.
 * **Anhalten** heißt: den Workflow „Stundenplan pruefen" deaktivieren
   (*Actions → Stundenplan pruefen → „…" → Disable workflow*). Das respektiert
-  der Wachhund. Einen Lauf nur abzubrechen genügt nicht mehr — dann wirft der
-  Wachhund die Kette bei seiner nächsten Runde wieder an.
+  der Wachhund. Einen Lauf nur abzubrechen genügt nicht: Sein wartender
+  Nachfolger übernimmt sofort, und sonst wirft der Wachhund die Kette wieder an.
+* `/today` braucht getUpdates — das geht nicht, solange am Bot ein **Webhook**
+  eingetragen ist. Wer den Bot zusätzlich anderswo nutzt, merkt das an einer
+  Warnung „Postfach" im Lauf-Log; die Änderungsmeldungen laufen unberührt
+  weiter.
 
 ## Nutzungsrechte
 
