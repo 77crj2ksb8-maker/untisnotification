@@ -9,7 +9,33 @@ auch die Mutationsproben, die Messreihen und die Begründungen, warum etwas
 über „Use this template" entsteht, beginnt mit einem einzigen Commit und hat
 diese Historie nicht.
 
-## 2.9.2 — 2026-10-06
+## 2.10.0 — 2026-10-06
+
+**Die Kette übersteht auch einen Lauf, der nie bis zum Ende kommt.**
+
+* **Der Nachfolger wird nach 20 Minuten angemeldet statt am Ende.** Bis 2.9
+  war die Anmeldung der letzte Schritt eines Laufs und fiel genau dann aus,
+  wenn ein Lauf nie dort ankam: Runner verloren, Zeitlimit, Abbruch. Jetzt
+  wartet der Nachfolger, egal wie der laufende endet. Scheitert die
+  Anmeldung, versucht es jeder weitere Durchlauf erneut, statt nur einmal.
+  Sturmschutz wie bisher (erst nach 20 Minuten), dazu: nie direkt nach
+  einem gescheiterten Durchlauf. Der eigene Workflow-Schritt, der Befehl
+  `nachfolger` und die Startzeit-Variable entfallen; `watch --kette`
+  übernimmt.
+* **Lebenszeichen für einen Aufpasser außerhalb von GitHub** (freiwillig,
+  Secret `UNTISBOT_PING_URL`, etwa healthchecks.io). Nach jedem gelungenen
+  Durchlauf geht ein Signal raus; bleibt es aus, alarmiert der Dienst. Das
+  schließt die beiden Lücken, die Wachhund und Störmeldung nicht abdecken:
+  GitHub löst gar nichts mehr aus, oder Telegram selbst ist weg. `selftest`
+  prüft es mit. Die Adresse steht in keinem Log, ein Fehler beim Senden
+  stört die Überwachung nie.
+* Dependabot meldet monatlich neue Versionen der Actions als einen Pull
+  Request — bewusst nicht für `requirements.txt`, ein Test hält das fest.
+* `repr()` der Konfiguration zeigt weder Token noch Passwort, Benutzername
+  oder Lebenszeichen-Adresse. Der Tests-Workflow darf nur noch lesen.
+* Neue Tests, unter anderem für den Wachhund-Neustart bei unklarem
+  Workflow-Zustand. Jede neue Zusicherung hat ihre Mutationsprobe.
+
 
 **Nur die Workflows, kein Verhalten.** Alle drei laufen fest auf
 `ubuntu-24.04` statt `ubuntu-latest`: Das Label wandert ab 19.10. auf Ubuntu

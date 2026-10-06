@@ -17,6 +17,10 @@ on:
     branches: [main]
   pull_request:
 
+# Nur lesen: Die Tests schreiben nichts -- weder Zustand noch Commit.
+permissions:
+  contents: read
+
 # Ein neuer Push macht den Lauf des vorigen ueberfluessig.
 concurrency:
   group: tests-${{ github.ref }}

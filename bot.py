@@ -19,10 +19,10 @@ Aufrufe:
 
     python bot.py check              einmal pruefen
     python bot.py watch              5,5 Stunden lang im Takt pruefen
+    python bot.py watch --kette      ... und den naechsten Lauf anmelden
     python bot.py selftest           Zugangsdaten einzeln durchtesten
     python bot.py testmessage        Beispielnachricht senden (ohne Wirkung)
     python bot.py alert "..."        Stoermeldung senden
-    python bot.py nachfolger --seit  naechsten Lauf anmelden (nur Actions)
     python bot.py wachhund           Kette pruefen, notfalls anwerfen (Actions)
     python bot.py show               Stundenplan anzeigen (Diagnose)
 """
@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import functools
 import hashlib
 import html
 import json
@@ -61,7 +62,7 @@ log = logging.getLogger("untisbot")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 
-VERSION = "2.9.2"
+VERSION = "2.10.0"
 
 #: Aussagekraeftiger User-Agent -- manche WebUntis-Instanzen verlangen einen.
 USER_AGENT = f"untisbot/{VERSION} (privates Stundenplan-Tool)"
@@ -85,15 +86,21 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class Config:
-    telegram_token: str
+    # repr=False bei allem, was geheim ist: Ein Config-Objekt landet sonst
+    # vollstaendig in jeder Ausgabe, die es darstellt -- einem Log, einer
+    # Fehlermeldung, einer pytest-Assertion.
+    telegram_token: str = dataclasses.field(repr=False)
     telegram_chats: tuple[str, ...]
     untis_server: str
     untis_school: str
-    untis_user: str
-    untis_password: str
+    untis_user: str = dataclasses.field(repr=False)
+    untis_password: str = dataclasses.field(repr=False)
     untis_klasse: str = ""
     lookahead_days: int = 7
     timezone: str = "Europe/Berlin"
+    #: Adresse fuer das Lebenszeichen (siehe dort). Leer = aus.
+    ping_url: str = dataclasses.field(default="", repr=False)
+
     @staticmethod
     def from_env(telegram_only: bool = False) -> Config:
         """Liest die Konfiguration aus Umgebungsvariablen.
@@ -143,6 +150,14 @@ class Config:
         except ValueError:
             raise ConfigError("LOOKAHEAD_DAYS muss eine ganze Zahl sein.") from None
 
+        # Kein ConfigError: Das Lebenszeichen ist Nebensache. Ein Tippfehler
+        # darin darf die Ueberwachung nicht verhindern, nur sich selbst.
+        ping_url = maybe("UNTISBOT_PING_URL")
+        if ping_url and not ping_url.startswith("https://"):
+            log.warning("UNTISBOT_PING_URL ist keine https-Adresse -- "
+                        "Lebenszeichen bleibt aus")
+            ping_url = ""
+
         return Config(
             telegram_token=token,
             telegram_chats=chats,
@@ -153,6 +168,7 @@ class Config:
             untis_klasse=maybe("WEBUNTIS_KLASSE"),
             lookahead_days=max(1, min(days, 30)),
             timezone=maybe("TIMEZONE", "Europe/Berlin"),
+            ping_url=ping_url,
         )
 
 
@@ -417,8 +433,8 @@ class Untis:
     # -- Lebenszyklus ------------------------------------------------------
 
     def __enter__(self) -> Untis:
-        # Bewusst erst hier: alert, wachhund und nachfolger brauchen kein
-        # WebUntis. Laege der Import oben, haengte die Stoermeldung an einer
+        # Bewusst erst hier: alert und wachhund brauchen kein WebUntis.
+        # Laege der Import oben, haengte die Stoermeldung an einer
         # Bibliothek, die sie gar nicht benutzt.
         import webuntis
 
@@ -1932,10 +1948,11 @@ def _commit_state(path: Path) -> bool:
 #
 # Zwei Bausteine halten die Kette am Leben, beide ueber die GitHub-API:
 #
-#   nachfolger  Jeder erfolgreiche Lauf meldet am Ende seinen Nachfolger an.
-#               Bis 2.8 hing die Kette allein am Zeitplaner -- und der loeste
-#               am 05.10. waehrend der gesamten Laufzeit von Lauf 96 kein
-#               einziges Mal aus. Ohne wartenden Nachfolger riss sie ab.
+#   nachfolger  Jeder Ueberwachungslauf meldet nach 20 Minuten seinen
+#               Nachfolger an; der wartet, bis der laufende endet -- egal
+#               wie. Bis 2.8 hing die Kette allein am Zeitplaner, und der
+#               loeste am 05.10. waehrend der gesamten Laufzeit von Lauf 96
+#               kein einziges Mal aus. Ohne wartenden Nachfolger riss sie ab.
 #   wachhund    Sieht von aussen nach, ob gerade ein Lauf laeuft oder wartet,
 #               und wirft die Kette bei Stillstand selbst wieder an.
 #
@@ -1952,13 +1969,11 @@ KETTEN_MINUTEN = 330
 #: check-timetable.yml. Testnachricht und selftest enden anders.
 KETTEN_TITEL = "· watch"
 
-#: Ein Lauf, der kuerzer war, meldet keinen Nachfolger an. Sturmschutz:
-#: Endete ein Lauf aus irgendeinem Grund sofort mit Erfolg, meldete er
-#: einen Nachfolger an, der ebenso sofort endete und den naechsten anmeldete
-#: -- eine Schleife im Minutentakt, jede Runde eine WebUntis-Anmeldung.
-#: watch() endet mit 0 heute nur nach Ablauf seiner Laufzeit; diese Grenze
-#: haelt auch dann, wenn sich das je aendert. Ein normaler Lauf dauert
-#: fuenf bis fuenfeinhalb Stunden.
+#: Vorher meldet ein Lauf keinen Nachfolger an. Sturmschutz: Ein Fehler,
+#: der jeden Lauf nach Sekunden beendet, wuerde sonst einen Nachfolger
+#: anmelden, der ebenso sofort endete und den naechsten anmeldete -- eine
+#: Schleife im Minutentakt, jede Runde mit WebUntis-Anmeldung und
+#: Stoermeldung. Wer 20 Minuten durchhaelt, steckt nicht in so einem Fehler.
 NACHFOLGER_MINDESTLAUFZEIT = 20 * 60          # Sekunden
 
 #: So lange wartet der Wachhund nach einem gescheiterten Lauf mit dem
@@ -1967,8 +1982,8 @@ NACHFOLGER_MINDESTLAUFZEIT = 20 * 60          # Sekunden
 #: die naechste Meldung -- alle halbe Stunde, die ganze Nacht.
 WACHHUND_FEHLERPAUSE = 120                    # Minuten
 
-#: Ein gerade beendeter Lauf gilt noch kurz als lebendig. Sein angemeldeter
-#: Nachfolger taucht in der API womoeglich erst einen Moment spaeter auf --
+#: Ein gerade beendeter Lauf gilt noch kurz als lebendig. Sein Nachfolger
+#: taucht in der API womoeglich erst einen Moment spaeter als laufend auf --
 #: ohne diese Spanne wuerfe der Wachhund genau dann eine zweite Kette an.
 WACHHUND_KULANZ = 10                          # Minuten
 
@@ -2065,25 +2080,56 @@ def kette_anmelden(zugang: GitHubZugang) -> str:
     return zweig
 
 
-def nachfolger_faellig(seit: float, jetzt: float) -> bool:
-    """Darf ein Lauf, der zur Unix-Zeit seit begann, jetzt nachmelden?"""
-    return jetzt - seit >= NACHFOLGER_MINDESTLAUFZEIT
+def nachfolger_faellig(laufzeit: float, fehlgeschlagen: bool) -> bool:
+    """Darf die Ueberwachung nach diesem Durchlauf ihren Nachfolger anmelden?
+
+    Erst nach NACHFOLGER_MINDESTLAUFZEIT (Sturmschutz, siehe dort) -- und
+    nie direkt nach einem Fehlschlag: Ein Lauf, der gerade in einer
+    Stoerung steckt, soll sie nicht an einen Nachfolger weiterreichen.
+    Bricht er an ihr ab, uebernimmt der Wachhund, mit Pause. Im Normalfall
+    faellt die Anmeldung damit auf den ersten Durchlauf nach Minute 20.
+    """
+    return laufzeit >= NACHFOLGER_MINDESTLAUFZEIT and not fehlgeschlagen
 
 
-def nachfolger(zugang: GitHubZugang, seit: float, jetzt: float) -> int:
-    """Letzter Schritt eines erfolgreichen Ueberwachungslaufs."""
-    minuten = int((jetzt - seit) // 60)
-    if not nachfolger_faellig(seit, jetzt):
-        print(f"Lauf lief nur {minuten} min -- kein Nachfolger (Sturmschutz). "
-              "Die Kette tragen jetzt Zeitplaner und Wachhund.")
-        return 0
+def nachfolger_anmelden(anmelden: Callable[[], str], laufzeit: float) -> bool:
+    """Meldet den Nachfolger an. True, wenn es geklappt hat.
+
+    Warum mitten im Lauf und nicht an seinem Ende: Ein wartender Nachfolger
+    uebernimmt, sobald der laufende endet -- auch wenn der nie bis zu einem
+    letzten Schritt kommt, weil GitHub den Runner verliert, der Job ins
+    Zeitlimit laeuft oder jemand ihn abbricht. Bis 2.9 kam die Anmeldung
+    erst danach und fiel in genau diesen Faellen aus.
+
+    Ein Fehlschlag hier stoert die Ueberwachung nie: Er wird geloggt, und
+    der naechste Durchlauf versucht es erneut -- ueber fuenf Stunden
+    hinweg statt einmal am Ende. Klappt es nie, tragen Zeitplaner und
+    Wachhund die Kette.
+    """
     try:
-        zweig = kette_anmelden(zugang)
-    except GitHubError as exc:
-        print(f"FEHLER: Nachfolger nicht angemeldet: {exc}", file=sys.stderr)
-        return 1
-    print(f"Nachfolger auf {zweig} angemeldet, nach {minuten} Minuten Laufzeit.")
-    return 0
+        zweig = anmelden()
+    except Exception as exc:
+        log.warning("Nachfolger nicht angemeldet (%s) -- der naechste "
+                    "Durchlauf versucht es erneut", exc)
+        return False
+    print(f"Nachfolger auf {zweig} angemeldet, nach "
+          f"{int(laufzeit // 60)} Minuten Laufzeit.", flush=True)
+    return True
+
+
+def kette_aus_umgebung() -> Callable[[], str] | None:
+    """Die Anmeldung fuer watch --kette, oder None ohne GitHub-Zugang.
+
+    Ein fehlender Zugang haelt die Ueberwachung nicht auf: Sie ist die
+    Hauptsache, die Kette nur ihr Fortbestand. Ohne Anmeldung tragen
+    Zeitplaner und Wachhund die Kette weiter.
+    """
+    try:
+        zugang = GitHubZugang.from_env()
+    except ConfigError as exc:
+        log.warning("Laufkette ohne Nachfolger: %s", str(exc).splitlines()[0])
+        return None
+    return functools.partial(kette_anmelden, zugang)
 
 
 @dataclass(frozen=True)
@@ -2237,6 +2283,43 @@ def wachhund(cfg: Config, zugang: GitHubZugang, quelle: str = "") -> int:
 
 
 # ===========================================================================
+#  Lebenszeichen  -- optional, fuer einen Aufpasser ausserhalb von GitHub
+# ===========================================================================
+#
+# Wachhund und Laufkette laufen beide auf GitHub. Faellt dort etwas aus,
+# das beide trifft -- der Zeitplaner schlaeft, wie vom 24.09. bis 05.10.
+# gemessen, oder Actions selbst steht --, meldet niemand etwas. Dagegen
+# hilft nur ein Aufpasser woanders: Der Bot schickt ihm nach jedem
+# gelungenen Durchlauf ein Signal, bleibt es aus, schlaegt ER Alarm.
+# Einrichtung: README.md, Abschnitt "Wenn etwas schiefgeht".
+
+#: Kurz: Ein haengender Aufpasser darf die Ueberwachung nicht aufhalten.
+LEBENSZEICHEN_TIMEOUT = 10
+
+
+def lebenszeichen(url: str) -> bool:
+    """Meldet dem Aufpasser: Die Ueberwachung lebt. True, wenn angenommen.
+
+    Wirft nie -- es ist Nebensache, und watch() faengt nur die Fehler von
+    check_once ab. Die Adresse steht nie im Log: Wer sie kennt, kann das
+    Signal faelschen. Darum nur der Typ des Fehlers, denn requests nennt
+    in seinen Meldungen die vollstaendige URL.
+    """
+    if not url:
+        return False
+    try:
+        antwort = requests.get(url, timeout=LEBENSZEICHEN_TIMEOUT,
+                               headers={"User-Agent": USER_AGENT})
+    except Exception as exc:
+        log.warning("Lebenszeichen nicht gesendet (%s)", type(exc).__name__)
+        return False
+    if not 200 <= antwort.status_code < 300:
+        log.warning("Lebenszeichen abgelehnt (HTTP %s)", antwort.status_code)
+        return False
+    return True
+
+
+# ===========================================================================
 #  Ablauf
 # ===========================================================================
 
@@ -2384,7 +2467,8 @@ def check_once(cfg: Config, dry_run: bool = False,
 def watch(cfg: Config, minutes: int, interval: int,
           night_interval: int | None = None,
           sleeper: Callable[[float], None] = time.sleep,
-          clock: Callable[[], float] = time.monotonic) -> int:
+          clock: Callable[[], float] = time.monotonic,
+          anmelden: Callable[[], str] | None = None) -> int:
     """Prueft ueber einen laengeren Zeitraum in festem Takt.
 
     Der Grund fuer diese Schleife: GitHubs Zeitplaner haelt kurze
@@ -2401,11 +2485,17 @@ def watch(cfg: Config, minutes: int, interval: int,
     beenden den Lauf erst nach FAILURE_LIMIT Versuchen in Folge. Dort steht,
     warum spaetes Aufgeben hier das kleinere Uebel ist.
 
+    Mit anmelden meldet der Lauf unterwegs einmal seinen Nachfolger an
+    (nachfolger_faellig, nachfolger_anmelden). Nach jedem gelungenen
+    Durchlauf geht ein Lebenszeichen raus, falls eingerichtet.
+
     Rueckgabewert ist der Exit-Code: 0 = in Ordnung, 1 = Eingriff noetig.
     """
-    deadline = clock() + minutes * 60
+    beginn = clock()
+    deadline = beginn + minutes * 60
     run = 0
     consecutive_failures = 0
+    angemeldet = anmelden is None        # ohne Kette nichts anzumelden
 
     while True:
         run += 1
@@ -2425,6 +2515,11 @@ def watch(cfg: Config, minutes: int, interval: int,
         first_line = result.message.splitlines()[0] if result.message else ""
         print(f"[{run:02d}] {marker} {first_line}", flush=True)
 
+        # IDLE zaehlt mit: Ferien oder eine gemerkte Ausnahmelage sind
+        # Arbeit ohne Meldung, kein Ausfall.
+        if result.status != FAILED:
+            lebenszeichen(cfg.ping_url)
+
         if result.status == FAILED:
             consecutive_failures += 1
             log.warning("Durchlauf %d fehlgeschlagen (%d in Folge): %s",
@@ -2441,6 +2536,10 @@ def watch(cfg: Config, minutes: int, interval: int,
             print(f"\n{consecutive_failures} Durchlaeufe in Folge "
                   f"fehlgeschlagen:\n{result.message}", file=sys.stderr)
             return 1
+
+        laufzeit = clock() - beginn
+        if not angemeldet and nachfolger_faellig(laufzeit, result.status == FAILED):
+            angemeldet = nachfolger_anmelden(anmelden, laufzeit)
 
         takt = (interval if night_interval is None else
                 interval_for(now_local(cfg.timezone), interval, night_interval))
@@ -2512,6 +2611,19 @@ def selftest(cfg: Config) -> int:
     except Exception as exc:
         print(f"  [NEIN] {str(exc).splitlines()[0]}")
         ok = False
+
+    # Nur pruefen, wenn eingerichtet: Es ist freiwillig, sein Fehlen kein
+    # Fehler. Eingerichtet aber kaputt waere dagegen ein stiller Ausfall
+    # genau des Signals, das Ausfaelle melden soll.
+    if cfg.ping_url:
+        print("Lebenszeichen    eingerichtet")
+        if lebenszeichen(cfg.ping_url):
+            print("  [ja  ] vom Aufpasser angenommen")
+        else:
+            print("  [NEIN] nicht angenommen -- UNTISBOT_PING_URL pruefen")
+            ok = False
+    else:
+        print("Lebenszeichen    nicht eingerichtet (freiwillig, siehe README)")
 
     print("=" * 58)
     print("Alles in Ordnung." if ok else "Mindestens ein Zugang ist kaputt.")
@@ -2768,6 +2880,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_watch.add_argument("--night-interval", type=int, default=None,
                          help="Sekunden zwischen zwei Pruefungen ausserhalb "
                               "der Schulzeit; ohne Angabe gilt --interval")
+    p_watch.add_argument("--kette", action="store_true",
+                         help="nach 20 Minuten den naechsten Lauf anmelden "
+                              "(nur in GitHub Actions)")
 
     sub.add_parser("selftest", help="Zugangsdaten einzeln pruefen")
     sub.add_parser("testmessage", help="Beispielnachricht im aktuellen Format senden")
@@ -2780,13 +2895,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_show = sub.add_parser("show", help="Stundenplan anzeigen")
     p_show.add_argument("--days", type=int, default=None)
 
-    # Die beiden Kettenbefehle laufen nur in GitHub Actions, wo der
-    # Workflow GITHUB_TOKEN und GITHUB_REPOSITORY mitgibt.
-    p_nach = sub.add_parser("nachfolger",
-                            help="naechsten Ueberwachungslauf anmelden")
-    p_nach.add_argument("--seit", type=float, required=True,
-                        help="Startzeit dieses Laufs als Unix-Zeit")
-
+    # Laeuft nur in GitHub Actions, wo der Workflow GITHUB_TOKEN und
+    # GITHUB_REPOSITORY mitgibt -- wie watch --kette.
     p_wach = sub.add_parser("wachhund",
                             help="pruefen, ob die Laufkette lebt; notfalls anwerfen")
     p_wach.add_argument("--quelle", default="",
@@ -2802,15 +2912,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     command = args.command or "check"
 
-    # Jeder Befehl verlangt nur, was er braucht. nachfolger braucht weder
-    # Telegram noch WebUntis -- fehlte deren Pflichtwert, risse sonst
-    # ausgerechnet die Kette ab. alert und wachhund brauchen kein WebUntis
-    # -- sonst schwiege die Stoermeldung genau dann, wenn sie noetig ist.
+    # Jeder Befehl verlangt nur, was er braucht: alert und wachhund kein
+    # WebUntis -- sonst schwiege die Stoermeldung genau dann, wenn sie
+    # noetig ist.
     try:
-        zugang = (GitHubZugang.from_env()
-                  if command in ("nachfolger", "wachhund") else None)
-        if command == "nachfolger":
-            return nachfolger(zugang, args.seit, time.time())
+        zugang = GitHubZugang.from_env() if command == "wachhund" else None
         cfg = Config.from_env(telegram_only=command in ("alert", "wachhund"))
     except ConfigError as exc:
         print(f"KONFIGURATIONSFEHLER: {exc}", file=sys.stderr)
@@ -2827,7 +2933,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "show":
         return show(cfg, args.days)
     if command == "watch":
-        return watch(cfg, args.minutes, args.interval, args.night_interval)
+        return watch(cfg, args.minutes, args.interval, args.night_interval,
+                     anmelden=kette_aus_umgebung() if args.kette else None)
 
     result = check_once(cfg, dry_run=args.dry_run)
     print(result.message or result.status)

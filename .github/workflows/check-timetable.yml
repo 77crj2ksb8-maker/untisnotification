@@ -16,8 +16,8 @@ run-name: "Stundenplan pruefen · ${{ github.event.inputs.modus || 'watch' }}"
 on:
   schedule:
     # Alle 30 Minuten, rund um die Uhr. Seit 2.9 traegt sich die Kette
-    # selbst (Schritt "Nachfolger anmelden"), der Zeitplaner ist nur noch
-    # Rueckfallebene: Er startet die Kette in einem frischen Repo und
+    # selbst (watch --kette, siehe "Ueberwachen"), der Zeitplaner ist nur
+    # noch Rueckfallebene: Er startet die Kette in einem frischen Repo und
     # fuellt den Warteplatz, falls eine Anmeldung einmal scheitert.
     - cron: "0,30 * * * *"
   workflow_dispatch:
@@ -123,12 +123,13 @@ jobs:
           WEBUNTIS_USERNAME: ${{ secrets.WEBUNTIS_USERNAME }}
           WEBUNTIS_PASSWORD: ${{ secrets.WEBUNTIS_PASSWORD }}
           WEBUNTIS_KLASSE: ${{ secrets.WEBUNTIS_KLASSE }}
+          # Freiwillig; ohne das Secret bleibt das Lebenszeichen aus.
+          UNTISBOT_PING_URL: ${{ secrets.UNTISBOT_PING_URL }}
+          # Fuer watch --kette: die Anmeldung des Nachfolgers.
+          GITHUB_TOKEN: ${{ github.token }}
           LOOKAHEAD_DAYS: "7"
           TIMEZONE: "Europe/Berlin"
         run: |
-          # Fuer den Sturmschutz in "Nachfolger anmelden": Nur wer lange
-          # genug lief, meldet einen Nachfolger an.
-          echo "UNTISBOT_START=$(date +%s)" >> "$GITHUB_ENV"
           case "${{ github.event.inputs.modus }}" in
             selftest)
               # Kein git config noetig: selftest schreibt nichts, weder
@@ -143,37 +144,23 @@ jobs:
               # Auch der Zweig fuer geplante Laeufe: Die setzen gar keine
               # Inputs, modus ist dann leer. Deshalb hier der Rueckfall auf
               # 330 -- ohne ihn liefe ein Cron-Lauf mit leerem --minutes.
+              #
+              # --kette ist der Kern der Laufkette: Nach 20 Minuten meldet
+              # der Lauf seinen Nachfolger selbst an, statt darauf zu hoffen,
+              # dass der Zeitplaner waehrend der 5,5 Stunden wenigstens
+              # einmal ausloest. Am 05.10. tat er das nicht -- Lauf 96
+              # endete, kein Nachfolger wartete, die Kette stand. Mitten im
+              # Lauf statt an seinem Ende, damit der Nachfolger auch dann
+              # uebernimmt, wenn dieser Lauf nie bis zum Ende kommt.
+              # Sturmschutz und Fehlerverhalten: nachfolger_faellig in bot.py.
               git config user.name  "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
-              python bot.py watch \
+              python bot.py watch --kette \
                 --minutes "${{ github.event.inputs.minuten || '330' }}" \
                 --interval 300 \
                 --night-interval 1800
               ;;
           esac
-
-      # Der Kern der Laufkette: Jeder erfolgreiche Lauf meldet seinen
-      # Nachfolger selbst an, statt darauf zu hoffen, dass der Zeitplaner
-      # waehrend der 5,5 Stunden wenigstens einmal ausloest. Am 05.10. tat
-      # er das nicht -- Lauf 96 endete, kein Nachfolger wartete, die Kette
-      # stand, bis der Wachhund sich meldete.
-      #
-      # Nur nach Erfolg: Ein gescheiterter Lauf meldet keinen an, sonst
-      # liefe ein Dauerfehler (Passwort geaendert) als Schleife, jede Runde
-      # mit Stoermeldung. Den Neustart nach Fehlschlaegen uebernimmt der
-      # Wachhund, mit Pause. Dazu die Mindestlaufzeit in bot.py.
-      #
-      # continue-on-error: Scheitert die Anmeldung, faellt die Kette auf
-      # Zeitplaner und Wachhund zurueck. Kein Grund fuer eine Stoermeldung.
-      - name: Nachfolger anmelden
-        if: >-
-          success() &&
-          github.event.inputs.modus != 'selftest' &&
-          github.event.inputs.modus != 'testmessage'
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python bot.py nachfolger --seit "$UNTISBOT_START"
 
       # Meldet sich selbst, statt darauf zu hoffen, dass jemand in den
       # Actions-Tab schaut. Greift bei allem, was den Lauf scheitern

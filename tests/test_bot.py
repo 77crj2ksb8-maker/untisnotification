@@ -363,7 +363,8 @@ BASIS_ENV = {
 @pytest.fixture
 def env(monkeypatch):
     """Saubere Umgebung: alle bekannten Variablen erst weg, dann die Basis."""
-    for name in [*BASIS_ENV, "WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE"]:
+    for name in [*BASIS_ENV, "WEBUNTIS_KLASSE", "LOOKAHEAD_DAYS", "TIMEZONE",
+                 "UNTISBOT_PING_URL"]:
         monkeypatch.delenv(name, raising=False)
     for name, value in BASIS_ENV.items():
         monkeypatch.setenv(name, value)
@@ -378,6 +379,38 @@ def test_config_aus_umgebung(env):
     assert cfg.untis_school == "ks-hausach"
     assert cfg.lookahead_days == 7
     assert cfg.timezone == "Europe/Berlin"
+
+
+def test_config_lebenszeichen_ist_freiwillig(env):
+    assert Config.from_env().ping_url == ""
+
+
+def test_config_lebenszeichen_uebernimmt_https(env):
+    env.setenv("UNTISBOT_PING_URL", " https://hc-ping.com/abc ")
+    assert Config.from_env().ping_url == "https://hc-ping.com/abc"
+
+
+def test_config_lebenszeichen_tippfehler_haelt_den_bot_nicht_auf(env, caplog):
+    """Ein Tippfehler im freiwilligen Lebenszeichen darf die Ueberwachung
+    nicht verhindern -- ein ConfigError beendete jeden Lauf vor dem ersten
+    Durchlauf."""
+    env.setenv("UNTISBOT_PING_URL", "hc-ping.com/abc")
+    assert Config.from_env().ping_url == ""
+    assert "keine https-Adresse" in caplog.text
+
+
+def test_config_darstellung_verraet_keine_geheimnisse(cfg):
+    """SICHERHEITSNETZ: Ein Config-Objekt landet sonst mit Passwort, Token
+    und Lebenszeichen-Adresse in jeder Ausgabe, die es darstellt -- einem
+    Log, einer Fehlermeldung, einer fehlgeschlagenen Assertion.
+
+    Mutationstest: bei untis_password "repr=False" streichen -> dieser
+    Test muss rot werden.
+    """
+    text = repr(dataclasses.replace(cfg, ping_url=PING))
+    for geheim in (cfg.telegram_token, cfg.untis_password, cfg.untis_user, PING):
+        assert geheim not in text
+    assert "ks-hausach" in text                  # der Rest bleibt lesbar
 
 
 def test_config_fehlendes_pflichtfeld(env):
@@ -3308,6 +3341,101 @@ def test_watch_wartet_nie_negativ(cfg, monkeypatch):
 
 
 # ===========================================================================
+#  Lebenszeichen
+# ===========================================================================
+
+#: Wie eine echte healthchecks.io-Adresse: Die UUID darin ist das Geheimnis.
+PING = "https://hc-ping.com/0f5e7d2a-geheim-1234"
+
+
+class PingAttrappe:
+    """Ersetzt requests.get und merkt sich jeden Aufruf."""
+
+    def __init__(self, antwort):
+        self.antwort = antwort
+        self.aufrufe = []
+
+    def __call__(self, url, timeout=None, headers=None):
+        self.aufrufe.append({"url": url, "timeout": timeout, "headers": headers})
+        if isinstance(self.antwort, Exception):
+            raise self.antwort
+        return type("Antwort", (), {"status_code": self.antwort})()
+
+
+def test_lebenszeichen_ohne_adresse_tut_nichts(monkeypatch):
+    ping = PingAttrappe(200)
+    monkeypatch.setattr(bot.requests, "get", ping)
+    assert bot.lebenszeichen("") is False
+    assert ping.aufrufe == []
+
+
+def test_lebenszeichen_wird_angenommen(monkeypatch):
+    ping = PingAttrappe(200)
+    monkeypatch.setattr(bot.requests, "get", ping)
+    assert bot.lebenszeichen(PING) is True
+    (aufruf,) = ping.aufrufe
+    assert aufruf["url"] == PING
+    assert aufruf["timeout"] == bot.LEBENSZEICHEN_TIMEOUT
+    assert aufruf["headers"]["User-Agent"] == bot.USER_AGENT
+
+
+def test_lebenszeichen_abgelehnt(monkeypatch, caplog):
+    monkeypatch.setattr(bot.requests, "get", PingAttrappe(404))
+    assert bot.lebenszeichen(PING) is False
+    assert "HTTP 404" in caplog.text
+
+
+def test_lebenszeichen_verraet_die_adresse_nicht(monkeypatch, caplog):
+    """SICHERHEITSNETZ: Wer die Adresse kennt, kann das Signal faelschen --
+    und der Aufpasser bliebe ruhig, waehrend der Bot steht. requests nennt
+    die vollstaendige URL in jeder Fehlermeldung.
+
+    Mutationstest: in lebenszeichen exc statt type(exc).__name__ loggen
+    -> dieser Test muss rot werden.
+    """
+    fehler = bot.requests.exceptions.ConnectionError(
+        f"HTTPSConnectionPool(host='hc-ping.com', port=443): Max retries "
+        f"exceeded with url: {PING}")
+    monkeypatch.setattr(bot.requests, "get", PingAttrappe(fehler))
+    assert bot.lebenszeichen(PING) is False
+    assert "ConnectionError" in caplog.text
+    assert "0f5e7d2a" not in caplog.text
+
+
+def test_watch_sendet_lebenszeichen_nur_nach_gelungenem_durchlauf(cfg,
+                                                                 monkeypatch):
+    """SICHERHEITSNETZ: Ein Lebenszeichen nach einem Fehlschlag hielte den
+    Aufpasser ruhig, waehrend der Bot seit Stunden nichts sieht. IDLE zaehlt
+    dagegen als gelungen: Ferien sind kein Ausfall.
+
+    Mutationstest: in watch die Bedingung vor lebenszeichen() streichen
+    -> dieser Test muss rot werden.
+    """
+    pings = []
+    monkeypatch.setattr(bot, "lebenszeichen", lambda url: pings.append(url) or True)
+    folge = [bot.Result(bot.OK), bot.Result(bot.FAILED, message="weg"),
+             bot.Result(bot.IDLE), bot.Result(bot.FAILED, message="weg")]
+    code, laeufe = watch_mit(monkeypatch, dataclasses.replace(cfg, ping_url=PING),
+                             folge, minutes=120)
+    assert code == 0
+    assert pings == [PING] * (laeufe - 2)
+
+
+def test_watch_ueberlebt_ein_kaputtes_lebenszeichen(cfg, monkeypatch):
+    """SICHERHEITSNETZ: watch() faengt nur Fehler aus check_once ab. Wuerfe
+    das Lebenszeichen, endete die ganze Ueberwachung -- wegen einer
+    Nebensache, und ausgerechnet ohne Stoermeldung ueber die Ursache.
+
+    Mutationstest: in lebenszeichen das try/except entfernen -> dieser Test
+    muss rot werden.
+    """
+    fehler = bot.requests.exceptions.ConnectionError("weg")
+    monkeypatch.setattr(bot.requests, "get", PingAttrappe(fehler))
+    code, laeufe = watch_mit(monkeypatch, dataclasses.replace(cfg, ping_url=PING), [])
+    assert code == 0 and laeufe == 11
+
+
+# ===========================================================================
 #  WebUntis-Randschicht  (mit Attrappen)
 # ===========================================================================
 
@@ -3726,25 +3854,64 @@ def test_main_fehlgeschlagener_check_gibt_1(cli, monkeypatch):
     assert bot.main(["check"]) == 1
 
 
-def test_main_watch_reicht_parameter_durch(cli, monkeypatch):
+def watch_attrappe(monkeypatch):
+    """Ersetzt watch und merkt sich, womit main() es aufruft."""
     gesehen = {}
-    monkeypatch.setattr(bot, "watch",
-                        lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
-                                                          night=n) or 0)
+
+    def fake_watch(_cfg, m, i, n, anmelden=None):
+        gesehen.update(minutes=m, interval=i, night=n, anmelden=anmelden)
+        return 0
+
+    monkeypatch.setattr(bot, "watch", fake_watch)
+    return gesehen
+
+
+def test_main_watch_reicht_parameter_durch(cli, monkeypatch):
+    gesehen = watch_attrappe(monkeypatch)
     bot.main(["watch", "--minutes", "12", "--interval", "60",
               "--night-interval", "900"])
-    assert gesehen == {"minutes": 12, "interval": 60, "night": 900}
+    assert gesehen == {"minutes": 12, "interval": 60, "night": 900,
+                       "anmelden": None}
 
 
 def test_main_watch_standardwerte(cli, monkeypatch):
-    gesehen = {}
-    monkeypatch.setattr(bot, "watch",
-                        lambda c, m, i, n: gesehen.update(minutes=m, interval=i,
-                                                          night=n) or 0)
+    gesehen = watch_attrappe(monkeypatch)
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
     bot.main(["watch"])
-    # 330 = 5,5 Stunden, dieselbe Laufzeit wie im Workflow. Ein kuerzerer
-    # Standard hinterliesse nach einem Handstart keinen wartenden Lauf.
-    assert gesehen == {"minutes": 330, "interval": 300, "night": None}
+    # 330 = 5,5 Stunden, dieselbe Laufzeit wie im Workflow. Und ohne
+    # --kette keine Anmeldung, selbst wenn ein GitHub-Zugang da ist: Ein
+    # lokaler Lauf soll nie in die echte Kette eingreifen.
+    assert gesehen == {"minutes": 330, "interval": 300, "night": None,
+                       "anmelden": None}
+
+
+def test_main_watch_kette_meldet_ueber_github_an(cli, monkeypatch):
+    gesehen = watch_attrappe(monkeypatch)
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
+    zugaenge = []
+    monkeypatch.setattr(bot, "kette_anmelden",
+                        lambda z: zugaenge.append(z.repo) or "main")
+    assert bot.main(["watch", "--kette"]) == 0
+    assert gesehen["anmelden"]() == "main"
+    assert zugaenge == ["a/b"]
+
+
+def test_main_watch_kette_ohne_github_zugang_ueberwacht_trotzdem(cli, monkeypatch,
+                                                                 caplog):
+    """SICHERHEITSNETZ: Die Kette ist Nebensache, die Ueberwachung die
+    Hauptsache. Fehlt der GitHub-Zugang, wird ohne Nachfolger ueberwacht --
+    statt gar nicht.
+
+    Mutationstest: in kette_aus_umgebung den ConfigError nicht abfangen
+    -> dieser Test muss rot werden.
+    """
+    gesehen = watch_attrappe(monkeypatch)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert bot.main(["watch", "--kette"]) == 0
+    assert gesehen["minutes"] == 330 and gesehen["anmelden"] is None
+    assert "ohne Nachfolger" in caplog.text
 
 
 def test_main_selftest(cli, monkeypatch):
@@ -3779,6 +3946,38 @@ def test_selftest_zeigt_den_benutzernamen_nicht_im_klartext(cfg, monkeypatch,
     assert "max.mustermann.2026" not in ausgabe
     # Diagnostisch weiterhin brauchbar: das richtige Konto bleibt erkennbar.
     assert bot.mask("max.mustermann.2026") in ausgabe
+
+
+def zugaenge_ok(monkeypatch):
+    """Telegram und WebUntis antworten, wie sie sollen."""
+    untis = FakeUntis([lesson()])
+    untis.schoolyears = lambda: []
+    monkeypatch.setattr(bot, "telegram_call", lambda *a, **k: {"username": "bot"})
+    monkeypatch.setattr(bot, "Untis", untis)
+
+
+def test_selftest_prueft_ein_eingerichtetes_lebenszeichen(cfg, monkeypatch,
+                                                         capsys):
+    """Eingerichtet, aber kaputt waere ein stiller Ausfall genau des
+    Signals, das Ausfaelle melden soll."""
+    zugaenge_ok(monkeypatch)
+    mit_ping = dataclasses.replace(cfg, ping_url=PING)
+
+    monkeypatch.setattr(bot, "lebenszeichen", lambda url: False)
+    assert bot.selftest(mit_ping) == 1
+    assert "UNTISBOT_PING_URL pruefen" in capsys.readouterr().out
+
+    monkeypatch.setattr(bot, "lebenszeichen", lambda url: True)
+    assert bot.selftest(mit_ping) == 0
+    assert "vom Aufpasser angenommen" in capsys.readouterr().out
+
+
+def test_selftest_ohne_lebenszeichen_ist_in_ordnung(cfg, monkeypatch, capsys):
+    zugaenge_ok(monkeypatch)
+    monkeypatch.setattr(bot, "lebenszeichen",
+                        lambda url: pytest.fail("ohne Adresse kein Signal"))
+    assert bot.selftest(cfg) == 0
+    assert "nicht eingerichtet" in capsys.readouterr().out
 
 
 def test_show_gibt_plan_aus(cfg, monkeypatch, capsys):
@@ -4283,10 +4482,12 @@ def test_kettenworkflow_gibt_es():
     assert (WURZEL / ".github" / "workflows" / bot.KETTEN_WORKFLOW).is_file()
 
 
-@pytest.mark.parametrize("sekunden,faellig", [
-    (0, False), (19 * 60 + 59, False), (20 * 60, True), (330 * 60, True)])
-def test_nachfolger_faellig_ab_mindestlaufzeit(sekunden, faellig):
-    assert bot.nachfolger_faellig(1000.0, 1000.0 + sekunden) is faellig
+@pytest.mark.parametrize("sekunden,fehlgeschlagen,faellig", [
+    (0, False, False), (19 * 60 + 59, False, False),
+    (20 * 60, False, True), (330 * 60, False, True),
+    (20 * 60, True, False), (330 * 60, True, False)])
+def test_nachfolger_faellig(sekunden, fehlgeschlagen, faellig):
+    assert bot.nachfolger_faellig(float(sekunden), fehlgeschlagen) is faellig
 
 
 class GitHubAttrappe:
@@ -4317,28 +4518,101 @@ class GitHubAntwort:
         return self._payload
 
 
-def test_nachfolger_kurzer_lauf_meldet_nichts_an(monkeypatch, capsys):
-    """SICHERHEITSNETZ: Sturmschutz. Ein Lauf, der nach einer Minute mit
-    Erfolg endet, darf keinen Nachfolger anmelden -- sonst wuerde daraus
-    eine Schleife im Minutentakt, jede Runde mit WebUntis-Anmeldung.
+def kette_mit(monkeypatch, cfg, ergebnisse, minutes, anmelden):
+    """watch_mit, aber mit Anmeldung. Gibt (Exit-Code, Durchlaeufe)."""
+    uhr = Uhr()
+    folge = list(ergebnisse)
+    laeufe = []
 
-    Mutationstest: nachfolger_faellig immer True liefern lassen -> dieser
-    Test muss rot werden.
+    def fake_check(_cfg):
+        laeufe.append(1)
+        uhr.jetzt += 3
+        return folge.pop(0) if folge else bot.Result(bot.OK)
+
+    monkeypatch.setattr(bot, "check_once", fake_check)
+    code = bot.watch(cfg, minutes, 300, sleeper=uhr.schlafe, clock=uhr,
+                     anmelden=lambda: anmelden(len(laeufe), uhr.jetzt))
+    return code, len(laeufe)
+
+
+def test_watch_meldet_nachfolger_erst_nach_mindestlaufzeit(cfg, monkeypatch):
+    """SICHERHEITSNETZ: Sturmschutz. Ein Lauf, der vor Minute 20 endet,
+    meldet keinen Nachfolger an -- sonst wuerde aus einem Fehler, der jeden
+    Lauf sofort beendet, eine Schleife im Minutentakt, jede Runde mit
+    WebUntis-Anmeldung. Und ein langer Lauf meldet genau einmal an, beim
+    ersten Durchlauf ab Minute 20.
+
+    Mutationstest: in nachfolger_faellig die Laufzeit-Bedingung streichen
+    -> dieser Test muss rot werden.
     """
-    api = GitHubAttrappe()
-    monkeypatch.setattr(bot.requests, "request", api)
-    assert bot.nachfolger(ZUGANG, seit=1000.0, jetzt=1060.0) == 0
-    assert api.aufrufe == []
-    assert "Sturmschutz" in capsys.readouterr().out
+    angemeldet = []
+    kette_mit(monkeypatch, cfg, [], 15,
+              lambda n, t: angemeldet.append((n, t)) or "main")
+    assert angemeldet == []
+
+    kette_mit(monkeypatch, cfg, [], 330,
+              lambda n, t: angemeldet.append((n, t)) or "main")
+    ((durchlauf, zeitpunkt),) = angemeldet
+    assert durchlauf == 5                       # Minute 0, 5, 10, 15, 20
+    assert zeitpunkt >= bot.NACHFOLGER_MINDESTLAUFZEIT
 
 
-def test_nachfolger_meldet_auf_dem_standardzweig_an(monkeypatch):
+def test_watch_meldet_nach_fehlschlag_keinen_nachfolger(cfg, monkeypatch):
+    """SICHERHEITSNETZ: Ein Lauf, der gerade in einer Stoerung steckt, meldet
+    keinen Nachfolger an, sondern wartet auf den naechsten gelungenen
+    Durchlauf. Sonst erbte der Nachfolger die Stoerung, bricht wie der
+    Vorgaenger nach sechs Fehlschlaegen ab, und jede Runde kaeme eine
+    Stoermeldung -- statt einer, nach der der Wachhund mit Pause uebernimmt.
+
+    Mutationstest: in nachfolger_faellig "and not fehlgeschlagen" streichen
+    -> dieser Test muss rot werden.
+    """
+    folge = [bot.Result(bot.OK)] * 4 + [bot.Result(bot.FAILED, message="weg")]
+    angemeldet = []
+    kette_mit(monkeypatch, cfg, folge, 120,
+              lambda n, t: angemeldet.append(n) or "main")
+    assert angemeldet == [6]
+
+    # Ein Lauf, der ab Minute 20 nur noch scheitert, meldet nie an.
+    folge = [bot.Result(bot.OK)] * 4 + [bot.Result(bot.FAILED, message="weg")] * 6
+    angemeldet.clear()
+    code, _ = kette_mit(monkeypatch, cfg, folge, 330,
+                        lambda n, t: angemeldet.append(n) or "main")
+    assert code == 1 and angemeldet == []
+
+
+def test_watch_anmeldefehler_stoert_die_ueberwachung_nicht(cfg, monkeypatch,
+                                                           caplog):
+    """SICHERHEITSNETZ: Scheitert die Anmeldung, laeuft die Ueberwachung
+    weiter, und der naechste Durchlauf versucht es erneut. Die Kette ist
+    Nebensache; ein API-Fehler darf nie den laufenden Lauf beenden.
+
+    Mutationstest: in nachfolger_anmelden das try/except entfernen
+    -> dieser Test muss rot werden.
+    """
+    versuche = []
+
+    def wackelig(n, _t):
+        versuche.append(n)
+        if len(versuche) == 1:
+            raise bot.GitHubError("POST dispatches -> HTTP 502: Bad Gateway")
+        if len(versuche) == 2:
+            raise KeyError("default_branch")     # auch Unerwartetes
+        return "main"
+
+    code, laeufe = kette_mit(monkeypatch, cfg, [], 120, wackelig)
+    assert code == 0 and laeufe == 24
+    assert versuche == [5, 6, 7]
+    assert "HTTP 502" in caplog.text
+
+
+def test_kette_anmelden_auf_dem_standardzweig(monkeypatch):
     """Immer auf dem Standard-Zweig, mit modus=watch und minuten als
     Zeichenkette -- workflow_dispatch lehnt Zahlen ab."""
     api = GitHubAttrappe(GitHubAntwort({"default_branch": "main"}),
                          GitHubAntwort(None, status=204))
     monkeypatch.setattr(bot.requests, "request", api)
-    assert bot.nachfolger(ZUGANG, seit=0.0, jetzt=330 * 60.0) == 0
+    assert bot.kette_anmelden(ZUGANG) == "main"
 
     lesen, anmelden = api.aufrufe
     assert lesen["method"] == "GET"
@@ -4350,12 +4624,9 @@ def test_nachfolger_meldet_auf_dem_standardzweig_an(monkeypatch):
     assert anmelden["headers"]["Authorization"] == "Bearer ghs_geheim123"
 
 
-def test_nachfolger_api_fehler_ist_exit_1(monkeypatch, capsys):
-    api = GitHubAttrappe(GitHubAntwort({"message": "Resource not accessible"},
-                                       status=403))
-    monkeypatch.setattr(bot.requests, "request", api)
-    assert bot.nachfolger(ZUGANG, seit=0.0, jetzt=330 * 60.0) == 1
-    assert "HTTP 403" in capsys.readouterr().err
+def test_nachfolger_anmelden_meldet_den_zweig(capsys):
+    assert bot.nachfolger_anmelden(lambda: "main", 1234.0) is True
+    assert "Nachfolger auf main angemeldet, nach 20 Minuten" in capsys.readouterr().out
 
 
 def test_github_call_leakt_den_token_nicht(monkeypatch):
@@ -4429,6 +4700,29 @@ def test_wachhund_wirft_abgerissene_kette_an_und_meldet(cfg, wachhund_welt):
     assert "neu angeworfen" in meldung and "nichts tun" in meldung
 
 
+def test_wachhund_wirft_an_wenn_der_workflow_zustand_unklar_ist(cfg,
+                                                               wachhund_welt,
+                                                               monkeypatch):
+    """Ist der Zustand des Workflows nicht abfragbar, versucht der Wachhund
+    den Neustart trotzdem. Eine wacklige API darf die Kette nicht stehen
+    lassen -- angehalten gilt sie nur, wenn GitHub das ausdruecklich sagt.
+
+    Mutationstest: "zustand not in (None, ...)" zu "zustand != ..." machen
+    -> dieser Test muss rot werden.
+    """
+    wachhund_welt["laeufe"] = [gh_lauf(96, ende="2020-01-01T00:00:00Z")]
+    welt_call = bot.github_call
+
+    def wackelig(zugang, method, pfad="", payload=None, params=None):
+        if pfad == f"actions/workflows/{bot.KETTEN_WORKFLOW}":
+            raise bot.GitHubError("GET -> HTTP 502: Bad Gateway")
+        return welt_call(zugang, method, pfad, payload, params)
+
+    monkeypatch.setattr(bot, "github_call", wackelig)
+    assert bot.wachhund(cfg, ZUGANG) == 0
+    assert wachhund_welt["angemeldet"] == 1
+
+
 def test_wachhund_ruhig_tut_nichts(cfg, wachhund_welt):
     wachhund_welt["laeufe"] = [gh_lauf(97, status="in_progress")]
     assert bot.wachhund(cfg, ZUGANG) == 0
@@ -4465,28 +4759,6 @@ def test_wachhund_ohne_historie_ist_exit_1_ohne_meldung(cfg, monkeypatch):
     assert gemeldet == []
 
 
-def test_main_nachfolger_braucht_weder_telegram_noch_webuntis(monkeypatch):
-    """Fehlte ein Telegram- oder WebUntis-Wert, risse sonst ausgerechnet
-    die Kette ab -- der Schritt bekommt nur den GitHub-Token."""
-    for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WEBUNTIS_SERVER"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
-    gesehen = {}
-    monkeypatch.setattr(
-        bot, "nachfolger",
-        lambda z, seit, jetzt: gesehen.update(seit=seit, repo=z.repo) or 0)
-    assert bot.main(["nachfolger", "--seit", "1234.5"]) == 0
-    assert gesehen == {"seit": 1234.5, "repo": "a/b"}
-
-
-def test_main_nachfolger_ohne_github_zugang(monkeypatch):
-    monkeypatch.setattr(bot, "_load_dotenv", lambda _p: None)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    assert bot.main(["nachfolger", "--seit", "0"]) == 1
-
-
 def test_main_wachhund_braucht_nur_telegram(cli, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setenv("GITHUB_REPOSITORY", "a/b")
@@ -4501,28 +4773,43 @@ def ketten_schritte():
     return kette, {s.get("name"): (i, s) for i, s in enumerate(job["steps"])}
 
 
-def test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung():
-    """SICHERHEITSNETZ: Ein gescheiterter Lauf darf keinen Nachfolger
-    anmelden -- sonst liefe ein Dauerfehler als Schleife, jede Runde mit
-    Stoermeldung. Und eine Anmeldung, die scheitert, darf den Lauf nicht
-    rot faerben: Das loeste "Stoerung melden" aus, obwohl ueberwacht wurde.
+def test_nur_die_ueberwachung_meldet_einen_nachfolger_an():
+    """SICHERHEITSNETZ: --kette gehoert genau an den watch-Aufruf. Bekaeme
+    ihn auch selftest oder testmessage, setzte eine Testnachricht eine
+    zweite Kette in Gang; fehlte er bei watch, hinge die Kette wieder
+    allein am Zeitplaner -- wie vor dem 05.10.
 
-    Mutationstest: im Workflow "success() &&" durch "always() &&" ersetzen
-    -> dieser Test muss rot werden.
+    Mutationstest: im Workflow "--kette" vom watch-Aufruf streichen -> dieser
+    Test muss rot werden.
     """
     kette, schritte = ketten_schritte()
-    i_ueberwachen, ueberwachen = schritte["Ueberwachen"]
-    i_nachfolger, nachfolger = schritte["Nachfolger anmelden"]
-    i_stoerung, _ = schritte["Stoerung melden"]
+    _, ueberwachen = schritte["Ueberwachen"]
+    # Nur Befehlszeilen -- der Kommentar daneben darf "--kette" erklaeren.
+    skript = "\n".join(z for z in ueberwachen["run"].splitlines()
+                       if not z.strip().startswith("#"))
 
-    bedingung = nachfolger["if"]
-    assert "success()" in bedingung and "always()" not in bedingung
-    assert "'selftest'" in bedingung and "'testmessage'" in bedingung
-    assert nachfolger["continue-on-error"] is True
-    assert "bot.py nachfolger" in nachfolger["run"]
-    assert "UNTISBOT_START" in ueberwachen["run"]
-    assert i_ueberwachen < i_nachfolger < i_stoerung
+    watch_aufruf = skript[skript.index("python bot.py watch"):]
+    watch_aufruf = watch_aufruf[:watch_aufruf.index(";;")]
+    assert "--kette" in watch_aufruf
+    assert skript.count("--kette") == 1
+    assert ueberwachen["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
     assert kette["permissions"]["actions"] == "write"
+    # Der fruehere Schritt am Lauf-Ende ist weg -- zwei Anmeldungen je Lauf
+    # ersetzten einander nur gegenseitig.
+    assert not any("bot.py nachfolger" in s.get("run", "")
+                   for _, s in schritte.values())
+
+
+def test_dependabot_nur_fuer_die_actions():
+    """Die Tests pruefen WebUntis nur mit Attrappen. Ein automatischer Pull
+    Request auf eine neue webuntis-Version waere gruen und koennte trotzdem
+    den Betrieb brechen -- die Obergrenze in requirements.txt hebt ein
+    Mensch, nach einem echten selftest."""
+    import yaml
+
+    konfig = yaml.safe_load((WURZEL / ".github" / "dependabot.yml")
+                            .read_text(encoding="utf-8"))
+    assert [u["package-ecosystem"] for u in konfig["updates"]] == ["github-actions"]
 
 
 def test_wachhund_workflow_darf_neu_anwerfen():

@@ -1,0 +1,18 @@
+# Meldet einmal im Monat neue Versionen der GitHub-Actions (checkout,
+# setup-python) als einen gemeinsamen Pull Request. Die Tests laufen darauf
+# automatisch, uebernehmen ist ein Klick. So waere die Node-20-Warnung aus
+# 2.9.2 von selbst gekommen, statt erst im Lauf-Log aufzufallen.
+#
+# Bewusst NICHT fuer requirements.txt: Die Tests pruefen WebUntis nur mit
+# Attrappen. Ein Pull Request auf webuntis 0.2 waere gruen -- und koennte im
+# Betrieb trotzdem scheitern. Diese Obergrenze hebt ein Mensch, nach einem
+# echten selftest. Ein Test haelt das fest.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

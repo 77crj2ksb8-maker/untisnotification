@@ -37,6 +37,8 @@ Montag, 14.09. (heute)
 * **Dauerbetrieb rund um die Uhr** — alle 5 Minuten in der Schulzeit, alle 30
   Minuten nachts und am Wochenende. Die Laufkette trägt sich selbst, und steht
   sie doch einmal, wirft der Wachhund sie bei seiner nächsten Runde wieder an.
+  Wer will, lässt den Bot zusätzlich von einem Dienst außerhalb von GitHub
+  überwachen (siehe [Lebenszeichen](#drittens-freiwillig-ein-aufpasser-außerhalb-von-github)).
 
 ## Einrichten
 
@@ -122,7 +124,9 @@ Sechs Pflichtwerte:
 | `WEBUNTIS_USERNAME` | `max.mustermann` |
 | `WEBUNTIS_PASSWORD` | dein Passwort |
 
-Optional ist `WEBUNTIS_KLASSE` — siehe [Einstellungen](#einstellungen).
+Optional sind `WEBUNTIS_KLASSE` — siehe [Einstellungen](#einstellungen) — und
+`UNTISBOT_PING_URL` für das
+[Lebenszeichen](#drittens-freiwillig-ein-aufpasser-außerhalb-von-github).
 
 `LOOKAHEAD_DAYS` und `TIMEZONE` gehören **nicht** hierher. Der Workflow setzt
 beide direkt als Umgebungsvariable, und die gewinnt immer gegen ein Secret
@@ -187,12 +191,11 @@ besser sein eigenes Repo ein.
 |---|---|
 | `python bot.py check` | einmal prüfen, melden, Zustand sichern |
 | `python bot.py check --dry-run` | prüfen und die Nachricht ausgeben, ohne zu senden oder zu speichern |
-| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst |
+| `python bot.py watch --minutes 330` | 5,5 Stunden lang prüfen; `--interval` (Standard 300 s) gilt in der Schulzeit, `--night-interval` sonst. `--kette` meldet nach 20 Minuten den nächsten Lauf an — nur in GitHub Actions, der Workflow setzt das selbst |
 | `python bot.py selftest` | jeden Zugang einzeln durchtesten und sagen, was klemmt |
 | `python bot.py testmessage` | Beispielnachricht senden — ohne jede Wirkung auf den Betrieb |
 | `python bot.py alert "..."` | Störmeldung senden (`--quelle` für den Link zum Lauf) |
 | `python bot.py show --days 3` | Stundenplan im Klartext anzeigen |
-| `python bot.py nachfolger --seit <unix-zeit>` | nächsten Überwachungslauf anmelden — nur in GitHub Actions, der Workflow ruft das selbst auf |
 | `python bot.py wachhund` | nachsehen, ob die Laufkette lebt, und sie notfalls anwerfen — nur in GitHub Actions |
 
 `--log DEBUG` und `--version` gibt es zu jedem Befehl.
@@ -216,6 +219,7 @@ Secrets also nie.
 | `LOOKAHEAD_DAYS` | optional | Vorausschau in Tagen, Standard 7, begrenzt auf 1–30 |
 | `TIMEZONE` | optional | Standard `Europe/Berlin` |
 | `LOG_LEVEL` | optional | Standard `INFO`; `DEBUG` zeigt auch, was die `webuntis`-Bibliothek treibt. `--log` auf der Kommandozeile gewinnt |
+| `UNTISBOT_PING_URL` | optional | Adresse für das [Lebenszeichen](#drittens-freiwillig-ein-aufpasser-außerhalb-von-github), nur `https://`. Ein Tippfehler schaltet nur das Lebenszeichen ab, nie den Bot |
 
 `WEBUNTIS_KLASSE` greift **nur**, wenn der persönliche Stundenplan gar nicht
 abrufbar ist. Liefert `my_timetable` Stunden, gewinnt der immer. Wer den
@@ -248,6 +252,7 @@ WEBUNTIS_PASSWORD=
 #LOOKAHEAD_DAYS=7
 #TIMEZONE=Europe/Berlin
 #LOG_LEVEL=INFO
+#UNTISBOT_PING_URL=
 ```
 
 ```bash
@@ -271,16 +276,18 @@ Zwei Dinge stehen dem Dauerbetrieb im Weg:
    Dauerprozess ist also gar nicht möglich.
 
 Die Lösung ist eine Kette statt eines Dauerlaufs. Jeder Lauf überwacht 5,5
-Stunden und **meldet am Ende seinen Nachfolger selbst an**. Der reiht sich über
-die `concurrency`-Gruppe als wartender Lauf ein und übernimmt im selben Moment,
-in dem der laufende endet. Ein bereits wartender Lauf wird dabei vom neueren
-ersetzt — es läuft also immer genau einer, und höchstens einer wartet.
+Stunden und **meldet nach 20 Minuten seinen Nachfolger selbst an**. Der reiht
+sich über die `concurrency`-Gruppe als wartender Lauf ein und übernimmt im
+selben Moment, in dem der laufende endet — egal wie: planmäßig, mit einem
+Fehler oder weil GitHub den Rechner darunter verliert. Ein bereits wartender
+Lauf wird dabei vom neueren ersetzt — es läuft also immer genau einer, und
+höchstens einer wartet.
 
 ```
-Lauf A  ├────────── 5,5 h ──────────┤
-                                  ↓ A meldet B an
-Lauf B                              ├────────── 5,5 h ──────────┤
-                                                              ↓ B meldet C an
+Lauf A  ├─ 20 min ─┬────────── 5,5 h ──────────┤
+                   ↓ A meldet B an, B wartet
+Lauf B             └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄├─ 20 min ─┬────────── …
+                                                          ↓ B meldet C an
 ```
 
 Bis Version 2.8 hing die Kette allein am Zeitplaner: Er musste während der 5,5
@@ -290,10 +297,16 @@ endete, niemand wartete, die Kette stand. Seither ist der Zeitplaner nur noch
 Rückfallebene: Er startet die Kette in einem frischen Repo und füllt den
 Warteplatz, falls eine Anmeldung einmal scheitert.
 
-Angemeldet wird nur nach einem **erfolgreichen** Lauf, der **mindestens 20
-Minuten** lief. Sonst könnte ein Fehler, der jeden Lauf sofort beendet, eine
-Schleife im Minutentakt erzeugen — jede Runde mit WebUntis-Anmeldung und
-Störmeldung.
+In 2.9 kam die Anmeldung noch als letzter Schritt eines Laufs — und fiel genau
+dann aus, wenn ein Lauf nie bis dorthin kam. Seit 2.10 geschieht sie mitten im
+Lauf, und scheitert sie (etwa weil die GitHub-API kurz hakt), versucht es jeder
+weitere Durchlauf erneut, über fünf Stunden hinweg.
+
+Angemeldet wird erst nach **20 Minuten** und **nie direkt nach einem
+gescheiterten Durchlauf**. Sonst könnte ein Fehler, der jeden Lauf sofort
+beendet, eine Schleife im Minutentakt erzeugen — jede Runde mit
+WebUntis-Anmeldung und Störmeldung —, und ein Lauf, der gerade in einer Störung
+steckt, reichte sie an seinen Nachfolger weiter.
 
 Den Takt innerhalb eines Laufs macht der Bot selbst — und zwar nach Tageszeit:
 alle 5 Minuten werktags zwischen 6 und 19 Uhr, sonst alle 30 Minuten. Nachts im
@@ -341,13 +354,37 @@ workflow*, **modus** auf `watch` lassen und **minuten** nicht anfassen. Nötig i
 das nur noch, wenn auch der Neustart durch den Wachhund scheitert — dann sagt
 seine Meldung genau das.
 
-Zwei Grenzen, die kein Code beheben kann:
+Zwei Grenzen haben Störmeldung und Wachhund:
 
 * **Ist Telegram selbst kaputt**, kann der Bot sich nicht über Telegram
-  melden. Dann bleibt nur GitHubs eigene Fehlermail an den Repo-Besitzer.
+  melden. Dann bleibt GitHubs eigene Fehlermail an den Repo-Besitzer.
 * **Löst GitHub gar nichts mehr aus**, schweigt auch der Wachhund — er hängt
   an derselben Cron-Mechanik. Er fängt den häufigeren Fall ab: Die Kette
   reißt, während der Rest von GitHub weiterläuft.
+
+### Drittens, freiwillig: ein Aufpasser außerhalb von GitHub
+
+Beide Grenzen schließt das **Lebenszeichen**. Nach jedem gelungenen Durchlauf
+schickt der Bot ein Signal an eine Adresse deiner Wahl. Bleibt es aus, schlägt
+der Dienst dahinter Alarm — per Mail oder Telegram, ganz unabhängig von GitHub.
+Er merkt also auch, wenn dort gar nichts mehr läuft.
+
+Einrichten mit [healthchecks.io](https://healthchecks.io) (kostenlos):
+
+1. Konto anlegen, **Add Check**, *Period* `30 minutes`, *Grace Time* `1 hour`.
+   Nachts prüft der Bot alle 30 Minuten; Alarm kommt, wenn anderthalb Stunden
+   lang kein gelungener Durchlauf gemeldet wurde. Eine kurze WebUntis-Wartung
+   löst so keinen aus.
+2. Unter *Integrations* E-Mail oder Telegram verbinden. E-Mail ist die
+   robustere Wahl: Sie meldet auch dann, wenn Telegram selbst ausfällt.
+3. Die *Ping URL* (`https://hc-ping.com/…`) als Secret `UNTISBOT_PING_URL`
+   eintragen.
+4. *Run workflow* mit **modus** `selftest`. Der schickt ein Signal und sagt, ob
+   es ankam.
+
+Die Adresse ist ein Geheimnis — wer sie kennt, kann Signale fälschen. Darum
+steht sie in keinem Log. Ohne das Secret bleibt das Lebenszeichen einfach aus,
+und ein Fehler beim Senden stört die Überwachung nie.
 
 Abgebrochene Läufe lösen **keine** Meldung aus. „Cancelled" ist kein
 „failure", und die Laufkette bricht ständig wartende Läufe ab — jeder davon
@@ -395,7 +432,7 @@ Secret dafür ist ohnehin schon da.
 
 ## Aufbau
 
-Das Repo besteht aus 11 Dateien, und jede hat genau eine Aufgabe:
+Das Repo besteht aus 12 Dateien, und jede hat genau eine Aufgabe:
 
 ```
 bot.py                                 der ganze Bot
@@ -409,6 +446,7 @@ CHANGELOG.md                           was sich wann geändert hat
 .github/workflows/check-timetable.yml  die Laufkette
 .github/workflows/watchdog.yml         meldet, wenn gar nichts mehr läuft
 .github/workflows/tests.yml            Linter, Tests und Workflow-Prüfung
+.github/dependabot.yml                 meldet neue Versionen der Actions
 ```
 
 Die drei Workflows sind bewusst drei Dateien. Sie sind keine Kapitel eines
@@ -488,8 +526,15 @@ vollständig bleibt:
 | eine abgerissene Laufkette wird erkannt und neu angeworfen | `test_wachhund_erkennt_den_vorfall_vom_05_10` |
 | eine eben beendete Testnachricht ist kein Lebenszeichen der Kette | `test_wachhund_testnachricht_ist_kein_lebenszeichen` |
 | ein Dauerfehler löst keine Meldungsflut aus | `test_wachhund_wartet_nach_fehlschlag` |
-| ein zu kurzer Lauf meldet keinen Nachfolger an (keine Sturmschleife) | `test_nachfolger_kurzer_lauf_meldet_nichts_an` |
-| nur ein erfolgreicher Überwachungslauf meldet einen Nachfolger an | `test_nachfolger_schritt_nur_nach_erfolg_und_nur_bei_ueberwachung` |
+| ein zu kurzer Lauf meldet keinen Nachfolger an (keine Sturmschleife) | `test_watch_meldet_nachfolger_erst_nach_mindestlaufzeit` |
+| ein Lauf in einer Störung reicht sie nicht an einen Nachfolger weiter | `test_watch_meldet_nach_fehlschlag_keinen_nachfolger` |
+| eine gescheiterte Anmeldung stört die Überwachung nicht | `test_watch_anmeldefehler_stoert_die_ueberwachung_nicht` |
+| ohne GitHub-Zugang wird trotzdem überwacht, nur ohne Nachfolger | `test_main_watch_kette_ohne_github_zugang_ueberwacht_trotzdem` |
+| nur die Überwachung meldet einen Nachfolger an, keine Testnachricht | `test_nur_die_ueberwachung_meldet_einen_nachfolger_an` |
+| ein Lebenszeichen gibt es nur nach einem gelungenen Durchlauf | `test_watch_sendet_lebenszeichen_nur_nach_gelungenem_durchlauf` |
+| ein kaputtes Lebenszeichen beendet nie die Überwachung | `test_watch_ueberlebt_ein_kaputtes_lebenszeichen` |
+| die Lebenszeichen-Adresse steht in keinem Log | `test_lebenszeichen_verraet_die_adresse_nicht` |
+| kein Geheimnis in der Darstellung der Konfiguration | `test_config_darstellung_verraet_keine_geheimnisse` |
 
 Der `run`-Block-Wächter ist aus Schaden entstanden: In 2.3.0 rutschte beim Einfügen des
 Meldeschritts das schließende `fi` des Überwachungsschritts in den neuen
